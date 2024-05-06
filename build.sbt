@@ -29,6 +29,8 @@ ThisBuild / licenses := List(("MIT", url("http://opensource.org/licenses/MIT")))
 
 ThisBuild / doctestTestFramework := DoctestTestFramework.ScalaCheck
 
+ThisBuild / tlFatalWarnings := false // disable fatal warnings in CI, as -Ykind-projector is now deprecated
+
 ThisBuild / developers ++= List(
   "mpilquist" -> "Michael Pilquist",
   "pchiusano" -> "Paul Chiusano",
