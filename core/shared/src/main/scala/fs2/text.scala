@@ -151,7 +151,7 @@ object text {
         }
 
       def processByteOrderMark(
-          buffer: Chunk.Queue[Byte] /* or null which we use as an Optional type to avoid boxing */,
+          buffer: Chunk.Queue[Byte] | Null /* or null which we use as an Optional type to avoid boxing */,
           s: Stream[F, Chunk[Byte]]
       ): Pull[F, String, Unit] =
         s.pull.uncons1.flatMap {

@@ -852,7 +852,7 @@ object Pull extends PullLowPriority {
   )(foldChunk: (B, Chunk[O]) => B)(implicit
       F: MonadError[F, Throwable]
   ): F[B] = {
-    var contP: ContP[Nothing, Nought, Any, Unit] = null
+    var contP: ContP[Nothing, Nought, Any, Unit] = null.asInstanceOf[ContP[Nothing, Nought, Any, Unit]]
 
     def getCont(): Cont[Any, Nothing, Nothing] = contP.asInstanceOf[Cont[Any, Nothing, Nothing]]
 

@@ -55,7 +55,7 @@ private[fs2] final class AsyncByteArrayInputStream(val bound: Int) extends Input
   }
 
   def release(): Unit =
-    cbytes = null
+    cbytes = null.asInstanceOf[List[Array[Byte]]]
 
   def push(chunk: Array[Byte]): Boolean =
     if (available < bound) {

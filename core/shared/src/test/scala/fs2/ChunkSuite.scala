@@ -140,7 +140,7 @@ class ChunkSuite extends Fs2Suite {
       if (implicitly[ClassTag[A]] == ClassTag.Byte)
         property("toByteBuffer.byte") {
           forAll { (c: Chunk[A]) =>
-            implicit val ev: A =:= Byte = null
+            implicit val ev: A =:= Byte = null.asInstanceOf[A =:= Byte]
             val arr = new Array[Byte](c.size)
             c.toByteBuffer.get(arr, 0, c.size)
             // fails to use `ev` to infer, so we resort to the untyped check
