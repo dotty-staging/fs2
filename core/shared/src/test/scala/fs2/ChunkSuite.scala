@@ -265,7 +265,7 @@ class ChunkSuite extends Fs2Suite {
 
         property("toByteVector") {
           forAll { (c: Chunk[A]) =>
-            implicit val ev: A =:= Byte = null
+            implicit val ev: A =:= Byte = null.asInstanceOf[A =:= Byte]
             assertEquals[Any, Any](c.toByteVector.toArray.toVector, c.toArray.toVector)
           }
         }

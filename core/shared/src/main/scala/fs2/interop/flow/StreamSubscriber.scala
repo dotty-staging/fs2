@@ -67,7 +67,7 @@ private[fs2] final class StreamSubscriber[F[_], A] private (
     * Meaning this should be correct if the Producer is well-behaved.
     */
   private var inOnNextLoop: Boolean = false
-  private var buffer: Array[Any] = null
+  private var buffer: Array[Any] | Null = null
   private var index: Int = 0
 
   /** Receives the next record from the upstream reactive-streams system. */
@@ -80,7 +80,7 @@ private[fs2] final class StreamSubscriber[F[_], A] private (
     // Optimized onNext loop.
     if (inOnNextLoop) {
       // If we are here, we can assume the array is properly initialized.
-      buffer(index) = a
+      buffer.nn(index) = a
       index += 1
       if (index == chunkSize) {
         nextState(input = CompleteNext)
@@ -165,7 +165,7 @@ private[fs2] final class StreamSubscriber[F[_], A] private (
               // We do the updates here,
               // to ensure they happen after we have secured the state.
               buffer = new Array(chunkSize)
-              buffer(0) = a
+              buffer.nn(0) = a
               index = 1
               inOnNextLoop = true
             }
@@ -188,7 +188,7 @@ private[fs2] final class StreamSubscriber[F[_], A] private (
           Idle(s) -> run {
             // We do the updates here,
             // to ensure they happen after we have secured the state.
-            val chunk = Chunk.array(buffer)
+            val chunk = Chunk.array(buffer.nn)
             inOnNextLoop = false
             buffer = null
             cb.apply(Right(Some(chunk)))
@@ -196,7 +196,7 @@ private[fs2] final class StreamSubscriber[F[_], A] private (
 
         case state =>
           Failed(
-            new InvalidStateException(operation = s"Received record [${buffer.last}]", state)
+            new InvalidStateException(operation = s"Received record [${buffer.nn.last}]", state)
           ) -> run {
             // We do the updates here,
             // to ensure they happen after we have secured the state.
@@ -250,7 +250,7 @@ private[fs2] final class StreamSubscriber[F[_], A] private (
               inOnNextLoop = false
               cb.apply(Right(None))
             } else {
-              val chunk = Chunk.array(buffer, offset = 0, length = index)
+              val chunk = Chunk.array(buffer.nn, offset = 0, length = index)
               inOnNextLoop = false
               buffer = null
               cb.apply(Right(Some(chunk)))
@@ -349,7 +349,7 @@ private[fs2] object StreamSubscriber {
     )
   }
 
-  private sealed abstract class StreamSubscriberException(msg: String, cause: Throwable = null)
+  private sealed abstract class StreamSubscriberException(msg: String, cause: Throwable | Null = null)
       extends IllegalStateException(msg, cause)
       with NoStackTrace
   private object StreamSubscriberException {
