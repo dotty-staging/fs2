@@ -110,6 +110,12 @@ sealed trait Channel[F[_], A] {
     */
   def close: F[Either[Channel.Closed, Unit]]
 
+  /** Gracefully closes this channel with a final element. This method will never block.
+    *
+    * No-op if the channel is closed, see [[close]] for further info.
+    */
+  def closeWithElement(a: A): F[Either[Channel.Closed, Unit]]
+
   /** Returns true if this channel is closed */
   def isClosed: F[Boolean]
 
@@ -151,30 +157,36 @@ object Channel {
             .drain
         }
 
-        def send(a: A) =
+        def sendImpl(a: A, close: Boolean) =
           F.deferred[Unit].flatMap { producer =>
-            F.uncancelable { poll =>
-              state.modify {
+            state.flatModifyFull { case (poll, state) =>
+              state match {
                 case s @ State(_, _, _, _, closed @ true) =>
                   (s, Channel.closed[Unit].pure[F])
 
                 case State(values, size, waiting, producers, closed @ false) =>
                   if (size < capacity)
                     (
-                      State(a :: values, size + 1, None, producers, false),
-                      notifyStream(waiting).as(rightUnit)
+                      State(a :: values, size + 1, None, producers, close),
+                      signalClosure.whenA(close) *> notifyStream(waiting).as(rightUnit)
                     )
                   else
                     (
-                      State(values, size, None, (a, producer) :: producers, false),
-                      notifyStream(waiting).as(rightUnit) <* waitOnBound(producer, poll)
+                      State(values, size, None, (a, producer) :: producers, close),
+                      signalClosure.whenA(close) *>
+                        notifyStream(waiting).as(rightUnit) <*
+                        waitOnBound(producer, poll).unlessA(close)
                     )
-              }.flatten
+              }
             }
           }
 
+        def send(a: A) = sendImpl(a, false)
+
+        def closeWithElement(a: A) = sendImpl(a, true)
+
         def trySend(a: A) =
-          state.modify {
+          state.flatModify {
             case s @ State(_, _, _, _, closed @ true) =>
               (s, Channel.closed[Boolean].pure[F])
 
@@ -186,22 +198,19 @@ object Channel {
                 )
               else
                 (s, rightFalse.pure[F])
-          }.flatten
+          }
 
         def close =
-          state
-            .modify {
-              case s @ State(_, _, _, _, closed @ true) =>
-                (s, Channel.closed[Unit].pure[F])
+          state.flatModify {
+            case s @ State(_, _, _, _, closed @ true) =>
+              (s, Channel.closed[Unit].pure[F])
 
-              case State(values, size, waiting, producers, closed @ false) =>
-                (
-                  State(values, size, None, producers, true),
-                  notifyStream(waiting).as(rightUnit) <* signalClosure
-                )
-            }
-            .flatten
-            .uncancelable
+            case State(values, size, waiting, producers, closed @ false) =>
+              (
+                State(values, size, None, producers, true),
+                notifyStream(waiting).as(rightUnit) <* signalClosure
+              )
+          }
 
         def isClosed = closedGate.tryGet.map(_.isDefined)
 

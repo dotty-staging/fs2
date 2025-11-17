@@ -26,6 +26,7 @@ package pcap
 
 import scodec.{Codec, Err}
 import scodec.codecs._
+import fs2.Chunk
 import fs2.interop.scodec._
 import fs2.timeseries._
 
@@ -51,7 +52,7 @@ object CaptureFile {
   ): StreamDecoder[TimeStamped[A]] =
     streamDecoder { global =>
       linkDecoders(global.network) match {
-        case None => Left(Err(s"unsupported link type ${global.network}"))
+        case None          => Left(Err(s"unsupported link type ${global.network}"))
         case Some(decoder) =>
           Right { hdr =>
             decoder.map { value =>
@@ -77,8 +78,27 @@ object CaptureFile {
     decoderFn <- f(global).fold(StreamDecoder.raiseError, StreamDecoder.emit)
     recordDecoder =
       RecordHeader.codec(global.ordering).flatMap { header =>
-        StreamDecoder.isolate(header.includedLength * 8)(decoderFn(header)).strict
+        fixedSizeBytes(header.includedLength, decoderFn(header).strict.decodeOnly)
       }
     values <- StreamDecoder.many(recordDecoder).flatMap(x => StreamDecoder.emits(x))
   } yield values
+
+  import fs2.protocols.ethernet.EthernetFrameHeader
+  import fs2.protocols.ip.IpHeader
+  import fs2.protocols.ip.udp.DatagramHeader
+  case class DatagramRecord(
+      ethernet: EthernetFrameHeader,
+      ip: IpHeader,
+      udp: DatagramHeader,
+      payload: Chunk[Byte]
+  )
+  def udpDatagrams: StreamDecoder[TimeStamped[DatagramRecord]] =
+    CaptureFile.payloadStreamDecoderPF { case LinkType.Ethernet =>
+      for {
+        ethernetHeader <- EthernetFrameHeader.sdecoder
+        ipHeader <- IpHeader.sdecoder(ethernetHeader)
+        udpHeader <- DatagramHeader.sdecoder(ipHeader.protocol)
+        payload <- StreamDecoder.once(scodec.codecs.bytes)
+      } yield DatagramRecord(ethernetHeader, ipHeader, udpHeader, Chunk.byteVector(payload))
+    }
 }

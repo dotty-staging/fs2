@@ -25,13 +25,11 @@ package net
 package tls
 
 import cats.Applicative
-import cats.effect.std.Semaphore
+import cats.effect.std.Mutex
 import cats.effect.kernel._
 import cats.syntax.all._
 
-import com.comcast.ip4s.{IpAddress, SocketAddress}
-
-import fs2.io.net.Socket
+import com.comcast.ip4s.{GenSocketAddress, IpAddress, SocketAddress}
 
 private[tls] trait TLSSocketPlatform[F[_]] {
 
@@ -53,7 +51,7 @@ private[tls] trait TLSSocketCompanionPlatform { self: TLSSocket.type =>
       engine: TLSEngine[F]
   ): F[TLSSocket[F]] =
     for {
-      readSem <- Semaphore(1)
+      readMutex <- Mutex[F]
     } yield new UnsealedTLSSocket[F] {
       def write(bytes: Chunk[Byte]): F[Unit] =
         engine.write(bytes)
@@ -62,7 +60,7 @@ private[tls] trait TLSSocketCompanionPlatform { self: TLSSocket.type =>
         engine.read(maxBytes)
 
       def readN(numBytes: Int): F[Chunk[Byte]] =
-        readSem.permit.use { _ =>
+        readMutex.lock.surround {
           def go(acc: Chunk[Byte]): F[Chunk[Byte]] = {
             val toRead = numBytes - acc.size
             if (toRead <= 0) Applicative[F].pure(acc)
@@ -76,7 +74,7 @@ private[tls] trait TLSSocketCompanionPlatform { self: TLSSocket.type =>
         }
 
       def read(maxBytes: Int): F[Option[Chunk[Byte]]] =
-        readSem.permit.use(_ => read0(maxBytes))
+        readMutex.lock.surround(read0(maxBytes))
 
       def reads: Stream[F, Byte] =
         Stream.repeatEval(read(8192)).unNoneTerminate.unchunks
@@ -90,11 +88,28 @@ private[tls] trait TLSSocketCompanionPlatform { self: TLSSocket.type =>
       def endOfInput: F[Unit] =
         socket.endOfInput
 
+      @deprecated("3.13.0", "Use address instead")
       def localAddress: F[SocketAddress[IpAddress]] =
         socket.localAddress
 
+      @deprecated("3.13.0", "Use peerAddress instead")
       def remoteAddress: F[SocketAddress[IpAddress]] =
         socket.remoteAddress
+
+      def address: GenSocketAddress =
+        socket.address
+
+      def peerAddress: GenSocketAddress =
+        socket.peerAddress
+
+      def supportedOptions: F[Set[SocketOption.Key[?]]] =
+        socket.supportedOptions
+
+      def getOption[A](key: SocketOption.Key[A]): F[Option[A]] =
+        socket.getOption(key)
+
+      def setOption[A](key: SocketOption.Key[A], value: A): F[Unit] =
+        socket.setOption(key, value)
 
       def beginHandshake: F[Unit] =
         engine.beginHandshake
@@ -105,6 +120,7 @@ private[tls] trait TLSSocketCompanionPlatform { self: TLSSocket.type =>
       def applicationProtocol: F[String] =
         engine.applicationProtocol
 
+      @deprecated("3.13.0", "No replacement; sockets are open until they are finalized")
       def isOpen: F[Boolean] = socket.isOpen
     }
 }

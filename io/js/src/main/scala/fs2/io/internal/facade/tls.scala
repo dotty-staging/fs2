@@ -22,35 +22,33 @@
 package fs2.io.internal.facade
 
 import fs2.io.net.tls.SecureContext
+import org.typelevel.scalaccompat.annotation._
 
-import scala.annotation.nowarn
 import scala.scalajs.js
 import scala.scalajs.js.annotation.JSImport
 import scala.scalajs.js.typedarray.Uint8Array
-import scala.scalajs.js.|
 
 import net.Socket
 
-package object tls {
+@nowarn212("cat=unused")
+@nowarn3("msg=unused import")
+private[io] object tls {
+
+  import scala.scalajs.js.|
 
   @js.native
   @JSImport("tls", "connect")
-  @nowarn
-  private[io] def connect(options: TLSConnectOptions): TLSSocket =
+  def connect(options: TLSConnectOptions): TLSSocket =
     js.native
 
   @js.native
   @JSImport("tls", "createSecureContext")
-  @nowarn
-  private[io] def createSecureContext(
+  def createSecureContext(
       options: js.UndefOr[SecureContextOptions] = js.undefined
   ): SecureContext =
     js.native
-}
 
-package tls {
-
-  private[io] trait SecureContextOptions extends js.Object {
+  trait SecureContextOptions extends js.Object {
 
     var ca: js.UndefOr[js.Array[String | Uint8Array]] = js.undefined
 
@@ -94,7 +92,7 @@ package tls {
 
   }
 
-  private[io] trait Key extends js.Object {
+  trait Key extends js.Object {
 
     val pem: String | Uint8Array
 
@@ -102,7 +100,7 @@ package tls {
 
   }
 
-  private[io] trait Pfx extends js.Object {
+  trait Pfx extends js.Object {
 
     val buf: String | Uint8Array
 
@@ -110,7 +108,7 @@ package tls {
 
   }
 
-  private[io] trait TLSConnectOptions extends js.Object {
+  trait TLSConnectOptions extends js.Object {
 
     var secureContext: js.UndefOr[SecureContext] = js.undefined
 
@@ -142,7 +140,7 @@ package tls {
 
   }
 
-  private[io] trait PSKCallbackNegotation extends js.Object {
+  trait PSKCallbackNegotation extends js.Object {
 
     var psk: js.UndefOr[Uint8Array] = js.undefined
 
@@ -151,13 +149,13 @@ package tls {
   }
 
   @js.native
-  private[io] trait PeerCertificate extends js.Object {
+  trait PeerCertificate extends js.Object {
 
     def raw: Uint8Array = js.native
 
   }
 
-  private[io] trait TLSSocketOptions extends js.Object {
+  trait TLSSocketOptions extends js.Object {
 
     var secureContext: js.UndefOr[SecureContext] = js.undefined
 
@@ -183,12 +181,21 @@ package tls {
 
   @JSImport("tls", "TLSSocket")
   @js.native
-  private[io] class TLSSocket extends Socket {
+  class TLSSocket extends Socket {
 
     def this(socket: fs2.io.Duplex, options: TLSSocketOptions) = this()
 
     def alpnProtocol: String | Boolean = js.native
 
+    def ssl: SSL = js.native
+
+    def getSession(): js.UndefOr[Uint8Array] = js.native
+
+  }
+
+  @js.native
+  trait SSL extends js.Object {
+    def verifyError(): js.Error = js.native
   }
 
 }

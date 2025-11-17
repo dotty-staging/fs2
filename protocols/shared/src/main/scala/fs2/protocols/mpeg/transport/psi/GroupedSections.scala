@@ -77,11 +77,11 @@ object GroupedSections {
     ) { (state, section) =>
       val key = toKey(section)
       val (err, acc) = state.accumulatorByIds.get(key) match {
-        case None => (None, SectionAccumulator(section))
+        case None      => (None, SectionAccumulator(section))
         case Some(acc) =>
           acc.add(section) match {
             case Right(acc) => (None, acc)
-            case Left(err) =>
+            case Left(err)  =>
               (
                 Some(GroupingError(section.tableId, section.extension.tableIdExtension, err)),
                 SectionAccumulator(section)
@@ -96,7 +96,7 @@ object GroupedSections {
           (newState, out)
         case Some(sections) =>
           val newState = ExtendedSectionGrouperState(state.accumulatorByIds - key)
-          val out = Chunk.seq((Right(sections) :: err.map(e => Left(e)).toList).reverse)
+          val out = Chunk.from((Right(sections) :: err.map(e => Left(e)).toList).reverse)
           (newState, out)
       }
     }

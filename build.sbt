@@ -2,28 +2,49 @@ import com.typesafe.tools.mima.core._
 
 Global / onChangedBuildSource := ReloadOnSourceChanges
 
-ThisBuild / tlBaseVersion := "3.2"
+ThisBuild / tlBaseVersion := "3.12"
 
 ThisBuild / organization := "co.fs2"
 ThisBuild / organizationName := "Functional Streams for Scala"
 ThisBuild / startYear := Some(2013)
 
-val NewScala = "2.13.8"
+val Scala213 = "2.13.16"
 
-ThisBuild / crossScalaVersions := Seq("3.1.3", "2.12.16", NewScala)
+ThisBuild / scalaVersion := Scala213
+ThisBuild / crossScalaVersions := Seq("2.12.20", Scala213, "3.3.6")
 ThisBuild / tlVersionIntroduced := Map("3" -> "3.0.3")
 
-ThisBuild / githubWorkflowJavaVersions := Seq(JavaSpec.temurin("17"))
-
-ThisBuild / tlCiReleaseBranches := List("main", "series/2.5.x")
+ThisBuild / githubWorkflowOSes := Seq("ubuntu-latest")
+ThisBuild / githubWorkflowJavaVersions := Seq(JavaSpec.temurin("17"), JavaSpec.temurin("21"))
+ThisBuild / githubWorkflowBuildPreamble ++= nativeBrewInstallWorkflowSteps.value
+ThisBuild / nativeBrewInstallCond := Some("matrix.project == 'rootNative'")
 
 ThisBuild / githubWorkflowBuild ++= Seq(
   WorkflowStep.Run(
     List("cd scalafix", "sbt testCI"),
     name = Some("Scalafix tests"),
-    cond = Some(s"matrix.scala == '$NewScala' && matrix.project == 'rootJVM'")
+    cond = Some(s"matrix.scala == '2.13' && matrix.project == 'rootJVM'")
   )
 )
+
+ThisBuild / githubWorkflowAddedJobs +=
+  WorkflowJob(
+    "macos",
+    "Test I/O on macOS",
+    scalas = Nil,
+    sbtStepPreamble = Nil,
+    javas = List(githubWorkflowJavaVersions.value.head),
+    oses = List(
+      "macos-14"
+    ), // FIXME: macos-15 breaks sending multicast to local network - https://github.com/actions/runner-images/issues/10924
+    matrixAdds = Map("project" -> List("ioJS", "ioJVM", "ioNative")),
+    steps = githubWorkflowJobSetup.value.toList ++ List(
+      WorkflowStep.Run(List("brew install s2n"), cond = Some("matrix.project == 'ioNative'")),
+      WorkflowStep.Sbt(List("${{ matrix.project }}/test"))
+    )
+  )
+
+ThisBuild / githubWorkflowPublishNeeds += "macos"
 
 ThisBuild / licenses := List(("MIT", url("http://opensource.org/licenses/MIT")))
 
@@ -69,6 +90,7 @@ ThisBuild / mimaBinaryIssueFilters ++= Seq(
   ProblemFilters.exclude[DirectAbstractMethodProblem]("fs2.Pull#CloseScope.*"),
   ProblemFilters.exclude[DirectMissingMethodProblem]("fs2.Pull#BindBind.*"),
   ProblemFilters.exclude[DirectMissingMethodProblem]("fs2.Pull#CloseScope.*"),
+  ProblemFilters.exclude[DirectMissingMethodProblem]("fs2.Pull.uncons"),
   ProblemFilters.exclude[MissingClassProblem]("fs2.Pull$CloseScope$"),
   ProblemFilters.exclude[MissingClassProblem]("fs2.Pull$EvalView"),
   ProblemFilters.exclude[MissingClassProblem]("fs2.Pull$View"),
@@ -160,7 +182,188 @@ ThisBuild / mimaBinaryIssueFilters ++= Seq(
     "fs2.compression.Compression.gunzip$default$1$"
   ),
   ProblemFilters.exclude[DirectMissingMethodProblem]("fs2.ChunkCompanionPlatform.makeArrayBuilder"),
-  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.concurrent.Channel.trySend")
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.concurrent.Channel.trySend"),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.compression.Compression.gunzip"),
+  ProblemFilters.exclude[ReversedMissingMethodProblem](
+    "fs2.io.net.tls.TLSContext#Builder.systemResource"
+  ),
+  ProblemFilters.exclude[ReversedMissingMethodProblem](
+    "fs2.io.net.tls.TLSContext#Builder.insecureResource"
+  ),
+  ProblemFilters.exclude[DirectMissingMethodProblem]( // something funky in Scala 3.2.0 ...
+    "fs2.io.net.SocketGroupCompanionPlatform#AsyncSocketGroup.this"
+  ),
+  ProblemFilters.exclude[DirectMissingMethodProblem](
+    "fs2.io.net.tls.S2nConnection#RecvCallbackContext.readBuffer"
+  ),
+  ProblemFilters.exclude[DirectMissingMethodProblem]("fs2.io.package.readBytesFromInputStream"),
+  ProblemFilters.exclude[DirectMissingMethodProblem]("fs2.io.package.readInputStreamGeneric"),
+  ProblemFilters.exclude[DirectMissingMethodProblem]("fs2.io.package.<clinit>"),
+  ProblemFilters.exclude[IncompatibleResultTypeProblem]("fs2.io.net.Socket.forAsync"),
+  ProblemFilters.exclude[IncompatibleMethTypeProblem](
+    "fs2.io.net.SocketCompanionPlatform#AsyncSocket.this"
+  ),
+  ProblemFilters.exclude[IncompatibleMethTypeProblem](
+    "fs2.io.net.unixsocket.UnixSocketsCompanionPlatform#AsyncSocket.this"
+  ),
+  // Private stuff (#3130).
+  ProblemFilters.exclude[MissingClassProblem](
+    "fs2.interop.flow.StreamSubscription$Request"
+  ),
+  ProblemFilters.exclude[MissingClassProblem](
+    "fs2.interop.flow.StreamSubscription$Request$"
+  ),
+  ProblemFilters.exclude[MissingClassProblem](
+    "fs2.interop.flow.StreamSubscription$Request$Finite"
+  ),
+  ProblemFilters.exclude[MissingClassProblem](
+    "fs2.interop.flow.StreamSubscription$Request$Finite$"
+  ),
+  ProblemFilters.exclude[MissingClassProblem](
+    "fs2.interop.flow.StreamSubscription$Request$Infinite$"
+  ),
+  ProblemFilters.exclude[MissingClassProblem](
+    "fs2.interop.flow.StreamSubscriber$FSM"
+  ),
+  ProblemFilters.exclude[DirectMissingMethodProblem](
+    "fs2.io.net.DatagramSocketGroupCompanionPlatform#AsyncDatagramSocketGroup.this"
+  ),
+  ProblemFilters.exclude[DirectMissingMethodProblem](
+    "fs2.io.file.Watcher#DefaultWatcher.this"
+  ),
+  // Private internal method: #3274
+  ProblemFilters.exclude[DirectMissingMethodProblem](
+    "fs2.Chunk.platformIterable"
+  ),
+  ProblemFilters.exclude[ReversedMissingMethodProblem](
+    "fs2.concurrent.Channel.closeWithElement"
+  ),
+  ProblemFilters.exclude[InheritedNewAbstractMethodProblem](
+    "fs2.io.file.Files.openSeekableByteChannel"
+  ),
+  // package-private method: #3318
+  ProblemFilters.exclude[IncompatibleMethTypeProblem](
+    "fs2.io.package.readInputStreamGeneric"
+  ),
+  // sealed trait: #3349
+  ProblemFilters.exclude[ReversedMissingMethodProblem](
+    "fs2.io.net.tls.TLSParameters.withClientAuthType"
+  ),
+  // equals/hashCode/toString on file attributes: #3345
+  ProblemFilters.exclude[ReversedMissingMethodProblem](
+    "fs2.io.file.PosixFileAttributes.fs2$io$file$PosixFileAttributes$$super=uals"
+  ),
+  ProblemFilters.exclude[ReversedMissingMethodProblem](
+    "fs2.io.file.PosixFileAttributes.fs2$io$file$PosixFileAttributes$$super#Code"
+  ),
+  // moved openssl/crypto bindings to fs2.hashing: #3454
+  ProblemFilters.exclude[DirectMissingMethodProblem]("fs2.hash.createHash"),
+  ProblemFilters.exclude[MissingClassProblem]("fs2.hash$Hash"),
+  ProblemFilters.exclude[MissingFieldProblem]("fs2.hash.openssl"),
+  ProblemFilters.exclude[MissingClassProblem]("fs2.hash$openssl$"),
+  // Privates: #3387
+  ProblemFilters.exclude[MissingClassProblem](
+    "fs2.interop.flow.StreamSubscriber$Input$Next"
+  ),
+  ProblemFilters.exclude[MissingClassProblem](
+    "fs2.interop.flow.StreamSubscriber$Input$Next$"
+  ),
+  ProblemFilters.exclude[MissingFieldProblem](
+    "fs2.interop.flow.StreamSubscriber#Input.Next"
+  ),
+  ProblemFilters.exclude[Problem](
+    "fs2.interop.flow.StreamSubscriber#State#WaitingOnUpstream.*"
+  ),
+  ProblemFilters.exclude[MissingTypesProblem](
+    "fs2.interop.flow.StreamSubscriber$State$WaitingOnUpstream$"
+  ),
+  // Network refactor: #3563
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.Network.connect"),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.Network.bind"),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.Network.bindAndAccept"),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.Socket.address"),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.Socket.peerAddress"),
+  ProblemFilters.exclude[InheritedNewAbstractMethodProblem]("fs2.io.net.Socket.address"),
+  ProblemFilters.exclude[InheritedNewAbstractMethodProblem]("fs2.io.net.Socket.supportedOptions"),
+  ProblemFilters.exclude[InheritedNewAbstractMethodProblem]("fs2.io.net.Socket.getOption"),
+  ProblemFilters.exclude[InheritedNewAbstractMethodProblem]("fs2.io.net.Socket.setOption"),
+  ProblemFilters.exclude[DirectMissingMethodProblem](
+    "fs2.io.net.SocketCompanionPlatform#AsyncSocket.this"
+  ),
+  ProblemFilters.exclude[MissingClassProblem]("fs2.io.net.SocketGroup$AbstractAsyncSocketGroup"),
+  ProblemFilters.exclude[MissingClassProblem]("fs2.io.net.SocketGroupCompanionPlatform"),
+  ProblemFilters.exclude[MissingClassProblem](
+    "fs2.io.net.SocketGroupCompanionPlatform$AsyncSocketGroup"
+  ),
+  ProblemFilters.exclude[InheritedNewAbstractMethodProblem]("fs2.io.net.tls.TLSSocket.address"),
+  ProblemFilters.exclude[InheritedNewAbstractMethodProblem](
+    "fs2.io.net.tls.TLSSocket.supportedOptions"
+  ),
+  ProblemFilters.exclude[InheritedNewAbstractMethodProblem]("fs2.io.net.tls.TLSSocket.getOption"),
+  ProblemFilters.exclude[InheritedNewAbstractMethodProblem]("fs2.io.net.tls.TLSSocket.setOption"),
+  ProblemFilters.exclude[MissingClassProblem]("fs2.io.net.unixsocket.JdkUnixSockets"),
+  ProblemFilters.exclude[MissingClassProblem]("fs2.io.net.unixsocket.JdkUnixSockets$"),
+  ProblemFilters.exclude[MissingClassProblem]("fs2.io.net.unixsocket.JdkUnixSocketsImpl"),
+  ProblemFilters.exclude[MissingClassProblem]("fs2.io.net.unixsocket.JnrUnixSockets"),
+  ProblemFilters.exclude[MissingClassProblem]("fs2.io.net.unixsocket.JnrUnixSockets$"),
+  ProblemFilters.exclude[MissingClassProblem]("fs2.io.net.unixsocket.JnrUnixSocketsImpl"),
+  ProblemFilters.exclude[MissingClassProblem](
+    "fs2.io.net.unixsocket.UnixSocketsCompanionPlatform$AsyncSocket"
+  ),
+  ProblemFilters.exclude[MissingClassProblem](
+    "fs2.io.net.unixsocket.UnixSocketsCompanionPlatform$AsyncUnixSockets"
+  ),
+  ProblemFilters.exclude[IncompatibleMethTypeProblem]("fs2.io.net.SelectingSocket.apply"),
+  ProblemFilters.exclude[MissingClassProblem]("fs2.io.net.SelectingSocketGroup"),
+  ProblemFilters.exclude[DirectMissingMethodProblem]("fs2.io.net.Socket.forAsync"),
+  ProblemFilters.exclude[ReversedMissingMethodProblem](
+    "fs2.io.net.SocketOptionCompanionPlatform#Key.get"
+  ),
+  ProblemFilters.exclude[InheritedNewAbstractMethodProblem](
+    "fs2.io.net.Network.openDatagramSocket"
+  ),
+  ProblemFilters.exclude[IncompatibleMethTypeProblem]("fs2.io.net.FdPollingSocket.apply"),
+  ProblemFilters.exclude[MissingClassProblem]("fs2.io.net.FdPollingSocketGroup"),
+  ProblemFilters.exclude[MissingClassProblem]("fs2.io.net.unixsocket.FdPollingUnixSockets"),
+  ProblemFilters.exclude[IncompatibleResultTypeProblem](
+    "fs2.io.net.AsynchronousDatagramSocketGroup#WriterDatagram.remote"
+  ),
+  ProblemFilters.exclude[IncompatibleMethTypeProblem](
+    "fs2.io.net.AsynchronousDatagramSocketGroup#WriterDatagram.this"
+  ),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.DatagramSocket.address"),
+  ProblemFilters.exclude[ReversedMissingMethodProblem](
+    "fs2.io.net.DatagramSocket.supportedOptions"
+  ),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.DatagramSocket.getOption"),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.DatagramSocket.setOption"),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.DatagramSocket.readGen"),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.DatagramSocket.connect"),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.DatagramSocket.disconnect"),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.DatagramSocket.write"),
+  ProblemFilters.exclude[MissingClassProblem](
+    "fs2.io.net.DatagramSocketGroupCompanionPlatform$AsyncDatagramSocketGroup"
+  ),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.Network.bindDatagramSocket"),
+  ProblemFilters.exclude[MissingClassProblem]("fs2.io.net.SocketGroup$"),
+  ProblemFilters.exclude[ReversedMissingMethodProblem](
+    "fs2.io.net.SocketOptionCompanionPlatform#Key.fs2$io$net$SocketOptionCompanionPlatform$Key$$$outer"
+  ),
+  ProblemFilters.exclude[ReversedMissingMethodProblem](
+    "fs2.io.net.DatagramSocketOption#Key.toSocketOption"
+  ),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.DatagramSocket.join"),
+  ProblemFilters.exclude[IncompatibleMethTypeProblem](
+    "fs2.io.net.DatagramSocketOption.multicastInterface"
+  ),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.Network.dns"),
+  ProblemFilters.exclude[ReversedMissingMethodProblem]("fs2.io.net.Network.interfaces"),
+  ProblemFilters.exclude[InheritedNewAbstractMethodProblem](
+    "fs2.io.net.tls.TLSContext#Builder.fromKeyStoreFile"
+  ),
+  ProblemFilters.exclude[InheritedNewAbstractMethodProblem](
+    "fs2.io.net.tls.TLSContext#Builder.fs2$io$net$tls$TLSContextCompanionPlatform$BuilderPlatform$$$outer"
+  )
 )
 
 lazy val root = tlCrossRootProject
@@ -170,35 +373,34 @@ lazy val root = tlCrossRootProject
     scodec,
     protocols,
     reactiveStreams,
+    integration,
     unidocs,
     benchmark
   )
 
-lazy val IntegrationTest = config("it").extend(Test)
+lazy val commonNativeSettings = Seq[Setting[?]](
+  tlVersionIntroduced := List("2.12", "2.13", "3").map(_ -> "3.13.0").toMap,
+  Test / nativeBrewFormulas += "openssl"
+)
 
-lazy val core = crossProject(JVMPlatform, JSPlatform)
+lazy val core = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("core"))
-  .configs(IntegrationTest)
-  .settings(Defaults.itSettings: _*)
-  .settings(
-    inConfig(IntegrationTest)(org.scalafmt.sbt.ScalafmtPlugin.scalafmtConfigSettings),
-    IntegrationTest / fork := true,
-    IntegrationTest / javaOptions += "-Dcats.effect.tracing.mode=none"
-  )
   .settings(
     name := "fs2-core",
     libraryDependencies ++= Seq(
-      "org.typelevel" %%% "cats-core" % "2.8.0",
-      "org.typelevel" %%% "cats-laws" % "2.8.0" % Test,
-      "org.typelevel" %%% "cats-effect" % "3.3.14",
-      "org.typelevel" %%% "cats-effect-laws" % "3.3.14" % Test,
-      "org.typelevel" %%% "cats-effect-testkit" % "3.3.14" % Test,
-      "org.scodec" %%% "scodec-bits" % "1.1.34",
-      "org.typelevel" %%% "scalacheck-effect-munit" % "1.0.4" % Test,
-      "org.typelevel" %%% "munit-cats-effect-3" % "1.0.7" % Test,
-      "org.typelevel" %%% "discipline-munit" % "1.0.9" % Test
+      "org.scodec" %%% "scodec-bits" % "1.2.4",
+      "org.typelevel" %%% "cats-core" % "2.13.0",
+      "org.typelevel" %%% "cats-effect" % "3.7.0-RC1",
+      "org.typelevel" %%% "cats-mtl" % "1.6.0",
+      "org.typelevel" %%% "cats-effect-laws" % "3.7.0-RC1" % Test,
+      "org.typelevel" %%% "cats-effect-testkit" % "3.7.0-RC1" % Test,
+      "org.typelevel" %%% "cats-laws" % "2.13.0" % Test,
+      "org.typelevel" %%% "cats-mtl-laws" % "1.6.0" % Test,
+      "org.typelevel" %%% "discipline-munit" % "2.0.0" % Test,
+      "org.typelevel" %%% "munit-cats-effect" % "2.2.0-RC1" % Test,
+      "org.typelevel" %%% "scalacheck-effect-munit" % "2.1.0-RC1" % Test
     ),
-    tlJdkRelease := Some(8),
+    tlJdkRelease := None,
     Compile / doc / scalacOptions ++= (if (scalaVersion.value.startsWith("2.")) Seq("-nowarn")
                                        else Nil)
   )
@@ -206,6 +408,10 @@ lazy val core = crossProject(JVMPlatform, JSPlatform)
 lazy val coreJVM = core.jvm
   .settings(
     Test / fork := true,
+    libraryDependencies ++= Seq(
+      "org.reactivestreams" % "reactive-streams-tck-flow" % "1.0.4" % Test,
+      "org.scalatestplus" %% "testng-7-5" % "3.2.14.0" % Test
+    ),
     doctestIgnoreRegex := Some(".*NotGiven.scala")
   )
 
@@ -217,23 +423,48 @@ lazy val coreJS = core.js
     scalaJSLinkerConfig ~= (_.withModuleKind(ModuleKind.CommonJSModule))
   )
 
-lazy val io = crossProject(JVMPlatform, JSPlatform)
+lazy val coreNative = core.native
+  .enablePlugins(ScalaNativeBrewedConfigPlugin)
+  .disablePlugins(DoctestPlugin)
+  .settings(commonNativeSettings)
+
+lazy val integration = project
+  .in(file("integration"))
+  .settings(
+    fork := true,
+    javaOptions += "-Dcats.effect.tracing.mode=none",
+    libraryDependencies ++= Seq(
+      "org.typelevel" %%% "munit-cats-effect" % "2.2.0-RC1" % Test
+    )
+  )
+  .enablePlugins(NoPublishPlugin)
+  .disablePlugins(DoctestPlugin)
+  .dependsOn(coreJVM)
+
+lazy val io = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("io"))
   .settings(
     name := "fs2-io",
-    libraryDependencies += "com.comcast" %%% "ip4s-core" % "3.1.3",
-    tlVersionIntroduced ~= { _.updated("3", "3.1.0") }
+    tlVersionIntroduced ~= { _.updated("3", "3.1.0") },
+    libraryDependencies += "com.comcast" %%% "ip4s-core" % "3.8.0-RC2",
+    tlJdkRelease := None
   )
   .jvmSettings(
     Test / fork := true,
     libraryDependencies ++= Seq(
-      "com.github.jnr" % "jnr-unixsocket" % "0.38.17" % Optional,
-      "com.google.jimfs" % "jimfs" % "1.2" % Test
+      "com.github.jnr" % "jnr-unixsocket" % "0.38.23" % Optional,
+      "com.google.jimfs" % "jimfs" % "1.3.1" % Test
     )
   )
   .jsSettings(
     tlVersionIntroduced := List("2.12", "2.13", "3").map(_ -> "3.1.0").toMap,
     scalaJSLinkerConfig ~= (_.withModuleKind(ModuleKind.CommonJSModule))
+  )
+  .nativeEnablePlugins(ScalaNativeBrewedConfigPlugin)
+  .nativeSettings(commonNativeSettings)
+  .nativeSettings(
+    Test / nativeBrewFormulas += "s2n",
+    Test / envVars ++= Map("S2N_DONT_MLOCK" -> "1")
   )
   .dependsOn(core % "compile->compile;test->test")
   .jsSettings(
@@ -279,28 +510,34 @@ lazy val io = crossProject(JVMPlatform, JSPlatform)
       ),
       ProblemFilters.exclude[IncompatibleResultTypeProblem](
         "fs2.io.net.tls.SecureContext#SecureVersion#TLSv1.3.toJS"
+      ),
+      ProblemFilters.exclude[DirectMissingMethodProblem]("fs2.io.net.tls.TLSSocket.forAsync"),
+      ProblemFilters.exclude[IncompatibleResultTypeProblem](
+        "fs2.io.net.tls.TLSParameters#DefaultTLSParameters.toTLSConnectOptions"
       )
     )
   )
 
-lazy val scodec = crossProject(JVMPlatform, JSPlatform)
+lazy val scodec = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("scodec"))
   .settings(
     name := "fs2-scodec",
     libraryDependencies += "org.scodec" %%% "scodec-core" % (if (
                                                                scalaVersion.value.startsWith("2.")
                                                              )
-                                                               "1.11.9"
-                                                             else "2.1.0"),
+                                                               "1.11.11"
+                                                             else "2.3.3"),
     tlVersionIntroduced := List("2.12", "2.13", "3").map(_ -> "3.2.0").toMap,
     tlJdkRelease := Some(8)
   )
   .jsSettings(
     scalaJSLinkerConfig ~= (_.withModuleKind(ModuleKind.CommonJSModule))
   )
+  .nativeEnablePlugins(ScalaNativeBrewedConfigPlugin)
+  .nativeSettings(commonNativeSettings)
   .dependsOn(core % "compile->compile;test->test", io % "test")
 
-lazy val protocols = crossProject(JVMPlatform, JSPlatform)
+lazy val protocols = crossProject(JVMPlatform, JSPlatform, NativePlatform)
   .in(file("protocols"))
   .settings(
     name := "fs2-protocols",
@@ -310,6 +547,8 @@ lazy val protocols = crossProject(JVMPlatform, JSPlatform)
   .jsSettings(
     scalaJSLinkerConfig ~= (_.withModuleKind(ModuleKind.CommonJSModule))
   )
+  .nativeEnablePlugins(ScalaNativeBrewedConfigPlugin)
+  .nativeSettings(commonNativeSettings)
   .dependsOn(core % "compile->compile;test->test", scodec, io)
 
 lazy val reactiveStreams = project
@@ -319,7 +558,7 @@ lazy val reactiveStreams = project
     libraryDependencies ++= Seq(
       "org.reactivestreams" % "reactive-streams" % "1.0.4",
       "org.reactivestreams" % "reactive-streams-tck" % "1.0.4" % "test",
-      "org.scalatestplus" %% "testng-7-5" % "3.2.12.0" % "test"
+      "org.scalatestplus" %% "testng-7-5" % "3.2.17.0" % "test"
     ),
     tlJdkRelease := Some(8),
     Test / fork := true // Otherwise SubscriberStabilitySpec fails
@@ -331,6 +570,7 @@ lazy val unidocs = project
   .enablePlugins(TypelevelUnidocPlugin)
   .settings(
     name := "fs2-docs",
+    tlJdkRelease := None,
     tlFatalWarnings := false,
     ScalaUnidoc / unidoc / unidocProjectFilter := inProjects(
       core.jvm,
@@ -359,7 +599,8 @@ lazy val microsite = project
       sbt.IO.copyDirectory(mdocOut.value, (laikaSite / target).value)
       Set.empty
     },
-    tlFatalWarningsInCi := false,
+    tlJdkRelease := None,
+    tlFatalWarnings := false,
     tlSiteApiPackage := Some("fs2")
   )
   .dependsOn(coreJVM, io.jvm, reactiveStreams, scodec.jvm)

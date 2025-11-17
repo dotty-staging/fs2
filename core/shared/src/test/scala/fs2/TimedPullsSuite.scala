@@ -23,7 +23,6 @@ package fs2
 
 import cats.effect.IO
 import cats.effect.testkit.TestControl
-import cats.syntax.all._
 import org.scalacheck.effect.PropF.forAllF
 
 import scala.concurrent.duration._
@@ -135,7 +134,7 @@ class TimedPullsSuite extends Fs2Suite {
         .timed { tp =>
           def go(tp: Pull.Timed[IO, Int]): Pull[IO, String, Unit] =
             tp.uncons.flatMap {
-              case None => Pull.done
+              case None                   => Pull.done
               case Some((Right(_), next)) =>
                 Pull.output1("elem") >> tp.timeout(timeout) >> go(next)
               case Some((Left(_), next)) => Pull.output1("timeout") >> go(next)
@@ -242,7 +241,7 @@ class TimedPullsSuite extends Fs2Suite {
         .timed { tp =>
           def go(tp: Pull.Timed[IO, Unit]): Pull[IO, String, Unit] =
             tp.uncons.flatMap {
-              case None => Pull.done
+              case None                => Pull.done
               case Some((Right(_), n)) =>
                 Pull.output1("elem") >>
                   tp.timeout(0.millis) >> // cancel old timeout without starting a new one
@@ -314,8 +313,19 @@ class TimedPullsSuite extends Fs2Suite {
   }
 
   test("After the first uncons, timeouts start immediately") {
+    // Time how often we generate data in the main stream.
+    // This is only started after the first uncons.
     val emissionTime = 100.millis
-    val timeout = 200.millis
+
+    // Timeout which is registered before the first uncons, it is registered immediately
+    // But we do not expect it to trigger.
+    // This has to be longer than emissionTime, otherwise the first uncons would always timeout.
+    val initialTimeout = 200.millis
+
+    // Timeout registered after the first uncons, this one should be fired
+    val timeout = 50.millis
+
+    // Time we wait before doing uncons.
     val timedPullPause = Pull.eval(IO.sleep(150.millis))
 
     val prog =
@@ -324,7 +334,7 @@ class TimedPullsSuite extends Fs2Suite {
         .repeatN(2)
         .pull
         .timed { tp =>
-          tp.timeout(timeout) >>
+          tp.timeout(initialTimeout) >>
             // If the first timeout started immediately, this pause
             // before uncons would cause a timeout to be emitted
             timedPullPause >>

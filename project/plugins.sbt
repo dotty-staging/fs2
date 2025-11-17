@@ -1,9 +1,10 @@
-val sbtTypelevelVersion = "0.4.13"
+val sbtTypelevelVersion = "0.8.1"
 addSbtPlugin("org.typelevel" % "sbt-typelevel" % sbtTypelevelVersion)
 addSbtPlugin("org.typelevel" % "sbt-typelevel-site" % sbtTypelevelVersion)
-addSbtPlugin("org.scala-js" % "sbt-scalajs" % "1.10.1")
-addSbtPlugin("com.github.tkawachi" % "sbt-doctest" % "0.10.0")
-addSbtPlugin("pl.project13.scala" % "sbt-jmh" % "0.4.3")
-addSbtPlugin("org.scalameta" % "sbt-mdoc" % "2.3.2")
+addSbtPlugin("org.scala-js" % "sbt-scalajs" % "1.20.1")
+addSbtPlugin("org.scala-native" % "sbt-scala-native" % "0.5.8")
+addSbtPlugin("com.armanbilge" % "sbt-scala-native-config-brew-github-actions" % "0.4.0")
+addSbtPlugin("io.github.sbt-doctest" % "sbt-doctest" % "0.12.2")
+addSbtPlugin("pl.project13.scala" % "sbt-jmh" % "0.4.8")
 
-ThisBuild / libraryDependencySchemes += "org.scala-lang.modules" %% "scala-xml" % VersionScheme.Always
+libraryDependencySchemes += "com.lihaoyi" %% "geny" % VersionScheme.Always

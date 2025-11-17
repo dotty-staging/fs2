@@ -23,9 +23,10 @@ package fs2
 package io
 
 import cats.effect.IO
-import fs2.Fs2Suite
 import fs2.io.internal.facade
 import org.scalacheck.effect.PropF.forAllF
+
+import scala.concurrent.duration._
 
 class IoPlatformSuite extends Fs2Suite {
 
@@ -90,6 +91,62 @@ class IoPlatformSuite extends Fs2Suite {
           }
       }
     }.attempt
+  }
+
+  test("unacknowledged 'end' does not prevent writeWritable cancelation") {
+    val writable = IO {
+      new facade.stream.Duplex(
+        new facade.stream.DuplexOptions {
+          var autoDestroy = false
+          var read = _ => ()
+          var write = (_, _, _, _) => ()
+          var `final` = (_, _) => ()
+          var destroy = (_, _, _) => ()
+        }
+      )
+    }
+
+    Stream.empty
+      .covary[IO]
+      .through(writeWritable[IO](writable))
+      .compile
+      .drain
+      .timeoutTo(100.millis, IO.unit)
+  }
+
+  test("Destroying Node.js stream without error does not raise an exception") {
+    Stream
+      .never[IO]
+      .through {
+        toDuplexAndRead[IO] { duplex =>
+          IO(duplex.destroy())
+        }
+      }
+      .compile
+      .drain
+  }
+
+  test("write in readWritable write callback does not hang") {
+    readWritable { writable =>
+      IO.async_[Unit] { cb =>
+        writable.write(
+          Chunk[Byte](0).toUint8Array,
+          _ => { // start the next write in the callback
+            writable.write(Chunk[Byte](1).toUint8Array, _ => cb(Right(())))
+            ()
+          }
+        )
+        ()
+      }
+    }.take(2).compile.toList.assertEquals(List[Byte](0, 1))
+  }
+
+  test("toReadable does not start input stream eagerly") {
+    IO.ref(true).flatMap { notStarted =>
+      toReadableResource(Stream.exec(notStarted.set(false))).surround {
+        IO.sleep(100.millis) *> notStarted.get.assert
+      }
+    }
   }
 
 }

@@ -21,28 +21,14 @@
 
 package fs2
 
+import scodec.bits.ByteVector
+
 import scala.collection.immutable.ArraySeq
 import scala.collection.immutable
 import scala.reflect.ClassTag
 
-private[fs2] trait ChunkPlatform[+O] { self: Chunk[O] =>
-
-  def toArraySeq[O2 >: O: ClassTag]: ArraySeq[O2] = {
-    val array: Array[O2] = new Array[O2](size)
-    copyToArray(array)
-    ArraySeq.unsafeWrapArray[O2](array)
-  }
-
-  def toArraySeqUntagged: ArraySeq[O] = {
-    val buf = ArraySeq.untagged.newBuilder[O]
-    buf.sizeHint(size)
-    var i = 0
-    while (i < size) {
-      buf += apply(i)
-      i += 1
-    }
-    buf.result()
-  }
+private[fs2] trait ChunkPlatform[+O] extends Chunk213And3Compat[O] {
+  self: Chunk[O] =>
 
   def toIArray[O2 >: O: ClassTag]: IArray[O2] = IArray.unsafeFromArray(toArray)
 
@@ -50,38 +36,58 @@ private[fs2] trait ChunkPlatform[+O] { self: Chunk[O] =>
     this match {
       case as: Chunk.IArraySlice[_] if ct.wrap.runtimeClass eq as.getClass =>
         as.asInstanceOf[Chunk.IArraySlice[O2]]
-      case _ => new Chunk.IArraySlice(IArray.unsafeFromArray(toArray(ct)), 0, size)
+      case _ => new Chunk.IArraySlice(IArray.unsafeFromArray(toArray(using ct)), 0, size)
+    }
+
+  private[fs2] def asSeqPlatform: Option[IndexedSeq[O]] =
+    this match {
+      case arraySlice: Chunk.ArraySlice[_] =>
+        Some(
+          ArraySeq
+            .unsafeWrapArray(arraySlice.values)
+            .slice(
+              from = arraySlice.offset,
+              until = arraySlice.offset + arraySlice.length
+            )
+        )
+
+      case iArraySlice: Chunk.IArraySlice[_] =>
+        Some(
+          ArraySeq
+            .unsafeWrapArray(
+              IArray.genericWrapArray(iArraySlice.values).toArray(using iArraySlice.ct)
+            )
+            .slice(
+              from = iArraySlice.offset,
+              until = iArraySlice.offset + iArraySlice.length
+            )
+        )
+
+      case _ =>
+        None
     }
 }
 
-private[fs2] trait ChunkCompanionPlatform { self: Chunk.type =>
+private[fs2] trait ChunkAsSeqPlatform[+O] extends ChunkAsSeq213And3Compat[O] {
+  self: ChunkAsSeq[O] =>
+}
 
-  protected def platformIterable[O](i: Iterable[O]): Option[Chunk[O]] =
-    i match {
-      case a: immutable.ArraySeq[O] => Some(arraySeq(a))
-      case _                        => None
-    }
+private[fs2] trait ChunkCompanionPlatform extends ChunkCompanion213And3Compat {
+  self: Chunk.type =>
 
-  /** Creates a chunk backed by an immutable `ArraySeq`.
-    */
-  def arraySeq[O](arraySeq: immutable.ArraySeq[O]): Chunk[O] = {
-    val arr = arraySeq.unsafeArray.asInstanceOf[Array[O]]
-    array(arr)(ClassTag[O](arr.getClass.getComponentType))
-  }
-
-  /** Creates a chunk backed by an immutable array.
-    */
+  /** Creates a chunk backed by an immutable array. */
   def iarray[O: ClassTag](arr: IArray[O]): Chunk[O] = new IArraySlice(arr, 0, arr.length)
 
-  /** Creates a chunk backed by a slice of an immutable array.
-    */
+  /** Creates a chunk backed by a slice of an immutable array. */
   def iarray[O: ClassTag](arr: IArray[O], offset: Int, length: Int): Chunk[O] =
     new IArraySlice(arr, offset, length)
 
-  case class IArraySlice[O](values: IArray[O], offset: Int, length: Int)(implicit ct: ClassTag[O])
-      extends Chunk[O] {
+  case class IArraySlice[O](values: IArray[O], offset: Int, length: Int)(implicit
+      private[fs2] val ct: ClassTag[O]
+  ) extends Chunk[O] {
     require(
-      offset >= 0 && offset <= values.size && length >= 0 && length <= values.size && offset + length <= values.size
+      offset >= 0 && offset <= values.size && length >= 0 && length <= values.size && offset + length <= values.size,
+      "IArraySlice out of bounds"
     )
 
     def size = length
@@ -113,9 +119,10 @@ private[fs2] trait ChunkCompanionPlatform { self: Chunk.type =>
     override def toIArray[O2 >: O: ClassTag]: IArray[O2] =
       if (offset == 0 && length == values.length) values
       else super.toIArray[O2]
-  }
 
-  /** Creates a chunk from a `scala.collection.IterableOnce`. */
-  def iterableOnce[O](i: collection.IterableOnce[O]): Chunk[O] =
-    iterator(i.iterator)
+    override def toByteVector[B >: O](implicit ev: B =:= Byte): ByteVector =
+      if (values.isInstanceOf[Array[Byte]])
+        ByteVector.view(values.asInstanceOf[Array[Byte]], offset, length)
+      else ByteVector.viewAt(i => apply(i.toInt), size.toLong)
+  }
 }

@@ -54,7 +54,7 @@ object Demultiplexer {
     */
   case class ResetDecodeState(context: List[String]) extends Err {
     def message = "reset decode state"
-    def pushContext(ctx: String) = ResetDecodeState(ctx :: context)
+    def pushContext(ctx: String): ResetDecodeState = ResetDecodeState(ctx :: context)
   }
 
   final case class State(byPid: Map[Pid, DecodeState])
@@ -268,16 +268,16 @@ object Demultiplexer {
       case ah: DecodeState.AwaitingHeader =>
         processHeader(ah.acc ++ newData, ah.startedAtOffsetZero, payloadUnitStartAfterData)
 
-      case ab: DecodeState.AwaitingBody[_] =>
+      case ab: DecodeState.AwaitingBody[?] =>
         processBody(ab.accumulate(newData), payloadUnitStartAfterData)
     }
 
     def handlePacket(state: Option[DecodeState], packet: Packet): StepResult[Out] =
       packet.payload match {
-        case None => StepResult.noOutput(state)
+        case None          => StepResult.noOutput(state)
         case Some(payload) =>
           val currentResult = state match {
-            case None => StepResult.noOutput(state)
+            case None        => StepResult.noOutput(state)
             case Some(state) =>
               val currentData = packet.payloadUnitStart
                 .map(start => payload.take(start.toLong * 8L))

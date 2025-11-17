@@ -25,10 +25,13 @@ package concurrent
 import cats.effect.IO
 import cats.effect.kernel.Ref
 import cats.syntax.all._
+import cats.arrow.FunctionK
 import cats.effect.testkit.TestControl
 // import cats.laws.discipline.{ApplicativeTests, FunctorTests}
 import scala.concurrent.duration._
 import org.scalacheck.effect.PropF.forAllF
+
+import java.util.NoSuchElementException
 
 class SignalSuite extends Fs2Suite {
   override def scalaCheckTestParameters =
@@ -49,6 +52,53 @@ class SignalSuite extends Fs2Suite {
             s.set(v) >> waitFor(s.get.map(_ == v)) >> waitFor(
               r.get.flatMap(rval =>
                 if (rval == 0) IO.pure(true)
+                else waitFor(r.get.map(_ == v)).as(true)
+              )
+            )
+          }
+          Stream.eval(consumer).concurrently(publisher).compile.drain
+        }
+      }
+    }
+  }
+
+  test("lens - get/set/discrete") {
+    case class Foo(bar: Long, baz: Long)
+    object Foo {
+      def get(foo: Foo): Long = foo.bar
+      def set(foo: Foo)(bar: Long): Foo = foo.copy(bar = bar)
+    }
+
+    forAllF { (vs0: List[Long]) =>
+      val vs = vs0.map(n => if (n == 0) 1 else n)
+      SignallingRef[IO].of(Foo(0L, -1L)).flatMap { s =>
+        val l = SignallingRef.lens(s)(Foo.get, Foo.set)
+        Ref.of[IO, Foo](Foo(0L, -1L)).flatMap { r =>
+          val publisher = s.discrete.evalMap(r.set)
+          val consumer = vs.traverse { v =>
+            l.set(v) >> waitFor(l.get.map(_ == v)) >> waitFor(
+              r.get.flatMap(rval =>
+                if (rval == Foo(0L, -1L)) IO.pure(true)
+                else waitFor(r.get.map(_ == Foo(v, -1L))).as(true)
+              )
+            )
+          }
+          Stream.eval(consumer).concurrently(publisher).compile.drain
+        }
+      }
+    }
+  }
+
+  test("mapref - get/set/discrete") {
+    forAllF { (vs0: List[Option[Long]]) =>
+      val vs = vs0.map(_.map(n => if (n == 0) 1 else n))
+      SignallingMapRef.ofSingleImmutableMap[IO, Unit, Long](Map(() -> 0L)).map(_(())).flatMap { s =>
+        Ref.of[IO, Option[Long]](Some(0)).flatMap { r =>
+          val publisher = s.discrete.evalMap(r.set)
+          val consumer = vs.traverse { v =>
+            s.set(v) >> waitFor(s.get.map(_ == v)) >> waitFor(
+              r.get.flatMap(rval =>
+                if (rval == Some(0)) IO.pure(true)
                 else waitFor(r.get.map(_ == v)).as(true)
               )
             )
@@ -80,6 +130,42 @@ class SignalSuite extends Fs2Suite {
     }
   }
 
+  test("mapref - discrete") {
+    // verifies that discrete always receives the most recent value, even when updates occur rapidly
+    forAllF { (v0: Option[Long], vsTl: List[Option[Long]]) =>
+      val vs = v0 :: vsTl
+      SignallingMapRef.ofSingleImmutableMap[IO, Unit, Long](Map(() -> 0L)).map(_(())).flatMap { s =>
+        Ref.of[IO, Option[Long]](Some(0L)).flatMap { r =>
+          val publisherR = s.discrete.evalMap(i => IO.sleep(10.millis) >> r.set(i))
+          val publisherS = vs.traverse(s.set)
+          val last = vs.last
+          val consumer = waitFor(r.get.map(_ == last))
+          Stream
+            .eval(consumer)
+            .concurrently(publisherR)
+            .concurrently(Stream.eval(publisherS))
+            .compile
+            .drain
+        }
+      }
+    }
+  }
+
+  test("changes") {
+    TestControl.executeEmbed {
+      SignallingRef[IO, Long](0L).flatMap { s =>
+        val updates =
+          IO.sleep(1.second) *> s.set(1L) *>
+            IO.sleep(1.second) *> s.set(1L) *>
+            IO.sleep(1.second) *> s.set(2L)
+
+        updates.background.surround {
+          s.changes.discrete.takeWhile(_ != 2L, true).compile.toList.assertEquals(List(0L, 1L, 2L))
+        }
+      }
+    }
+  }
+
   test("access cannot be used twice") {
     for {
       s <- SignallingRef[IO, Long](0L)
@@ -87,6 +173,23 @@ class SignalSuite extends Fs2Suite {
       (v, set) = access
       v1 = v + 1
       v2 = v1 + 1
+      r1 <- set(v1)
+      r2 <- set(v2)
+      r3 <- s.get
+    } yield {
+      assert(r1)
+      assert(!r2)
+      assertEquals(r3, v1)
+    }
+  }
+
+  test("mapref - access cannot be used twice") {
+    for {
+      s <- SignallingMapRef.ofSingleImmutableMap[IO, Unit, Long](Map(() -> 0L)).map(_(()))
+      access <- s.access
+      (v, set) = access
+      v1 = v.map(_ + 1)
+      v2 = v1.map(_ + 1)
       r1 <- set(v1)
       r2 <- set(v2)
       r3 <- s.get
@@ -113,9 +216,83 @@ class SignalSuite extends Fs2Suite {
     }
   }
 
+  test("mapref - access updates discrete") {
+    SignallingMapRef.ofSingleImmutableMap[IO, Unit, Int](Map(() -> 0)).map(_(())).flatMap { s =>
+      def cas: IO[Unit] =
+        s.access.flatMap { case (v, set) =>
+          set(v.map(_ + 1)).ifM(IO.unit, cas)
+        }
+
+      def updates =
+        s.discrete.takeWhile(_ != Some(1)).compile.drain
+
+      updates.start.flatMap { fiber =>
+        cas >> fiber.join.timeout(5.seconds)
+      }
+    }
+  }
+
+  test("mapref - does not emit spurious events") {
+    SignallingMapRef.ofSingleImmutableMap[IO, Boolean, Int](Map(false -> 0, true -> 0)).flatMap {
+      s =>
+        val events =
+          s(false).discrete.evalTap(_ => IO.sleep(1.seconds)).unNoneTerminate.compile.toList
+
+        val updates =
+          IO.sleep(1100.millis) *>
+            s(false).update(_.map(_ + 1)) *>
+            IO.sleep(1.second) *>
+            s(true).update(_.map(_ + 1)) *>
+            IO.sleep(1.seconds) *>
+            s(false).update(_.map(_ + 1)) *>
+            IO.sleep(1.seconds) *>
+            s(false).set(None)
+
+        TestControl.executeEmbed(updates.background.surround(events)).assertEquals(List(0, 1, 2))
+    }
+  }
+
   test("holdOption") {
     val s = Stream.range(1, 10).covary[IO].holdOption
     s.compile.drain
+  }
+
+  test("hold1 zip") {
+    Stream.range(1, 10).zip(Stream.range(1, 10)).covary[IO].hold1.compile.drain
+  }
+
+  test("hold1 empty") {
+    TestControl
+      .executeEmbed(Stream.empty.covary[IO].hold1.compile.drain)
+      .intercept[NoSuchElementException]
+  }
+
+  test("hold consistent with getAndDiscreteUpdates") {
+    forAllF { (init: Int, stream: Stream[Pure, Int]) =>
+      TestControl.executeEmbed {
+        stream.evalMap(IO.sleep(1.second).as(_)).holdResource(init).use { sig =>
+          sig.getAndDiscreteUpdates.use { case (got, updates) =>
+            IO(assertEquals(got, init)) *>
+              updates
+                .interruptAfter(Long.MaxValue.nanos)
+                .compile
+                .toVector
+                .assertEquals(stream.compile.toVector)
+          }
+        }
+      }
+    }
+  }
+
+  test("ap getAndDiscreteUpdates propagates changes from either signal") {
+    TestControl.executeEmbed {
+      (SignallingRef[IO].of((i: Int) => i + 1), SignallingRef[IO].of(0)).flatMapN {
+        case (ffs, fus) =>
+          (ffs: Signal[IO, Int => Int]).ap(fus).getAndDiscreteUpdates.use { case (_, updates) =>
+            fus.set(1) *> updates.head.compile.lastOrError.assertEquals(2) // should not hang
+          }
+      }
+    }
   }
 
   test("waitUntil") {
@@ -142,6 +319,19 @@ class SignalSuite extends Fs2Suite {
         }
 
     TestControl.executeEmbed(prog).assertEquals(expected)
+  }
+
+  test("SignallingRef#mapK returns a SignallingRef") {
+    for {
+      s <- SignallingRef[IO, Int](0)
+      nt = new FunctionK[IO, IO] {
+        def apply[A](fa: IO[A]): IO[A] = fa
+      }
+      transformed: SignallingRef[IO, Int] = s.mapK(nt)
+    } yield assert(
+      transformed.isInstanceOf[SignallingRef[IO, Int]],
+      s"Expected transformed to be a SignallingRef but got: ${transformed.getClass.getName}"
+    )
   }
 
   // TODO - Port laws tests once we have a compatible version of cats-laws

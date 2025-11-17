@@ -31,6 +31,8 @@ import cats.syntax.all._
 
 import com.comcast.ip4s._
 
+import SecureContext.SecureVersion._
+
 class TLSSocketSuite extends TLSSuite {
   val size = 8192
 
@@ -43,7 +45,7 @@ class TLSSocketSuite extends TLSSuite {
               SecureContext(minVersion = protocol.some, maxVersion = protocol.some)
             )
           )
-          socket <- Network[IO].client(SocketAddress(host"google.com", port"443"))
+          socket <- Network[IO].connect(SocketAddress(host"google.com", port"443"))
           tlsSocket <- tlsContext
             .clientBuilder(socket)
             .withParameters(
@@ -53,7 +55,7 @@ class TLSSocketSuite extends TLSSuite {
         } yield tlsSocket
 
       val googleDotCom = "GET / HTTP/1.1\r\nHost: www.google.com\r\n\r\n"
-      val httpOk = "HTTP/1.1 200 OK"
+      val httpOk = "HTTP/1.1"
 
       def writesBeforeReading(protocol: SecureContext.SecureVersion) =
         test(s"$protocol - client writes before reading") {
@@ -72,6 +74,7 @@ class TLSSocketSuite extends TLSSuite {
             .head
             .compile
             .string
+            .map(_.take(httpOk.length))
             .assertEquals(httpOk)
         }
 
@@ -92,11 +95,11 @@ class TLSSocketSuite extends TLSSuite {
             .head
             .compile
             .string
+            .map(_.take(httpOk.length))
             .assertEquals(httpOk)
         }
 
-      import SecureContext.SecureVersion._
-      List(TLSv1, `TLSv1.1`, `TLSv1.2`, `TLSv1.3`).foreach { protocol =>
+      List(`TLSv1.2`, `TLSv1.3`).foreach { protocol =>
         writesBeforeReading(protocol)
         readsBeforeWriting(protocol)
       }
@@ -106,11 +109,10 @@ class TLSSocketSuite extends TLSSuite {
       val msg = Chunk.array(("Hello, world! " * 20000).getBytes)
 
       val setup = for {
-        tlsContext <- Resource.eval(testTlsContext)
-        addressAndConnections <- Network[IO].serverResource(Some(ip"127.0.0.1"))
-        (serverAddress, server) = addressAndConnections
-        client <- Network[IO]
-          .client(serverAddress)
+        tlsContext <- Resource.eval(testTlsContext(true))
+        serverSocket <- Network[IO].bind(SocketAddress(ip"127.0.0.1", Port.Wildcard))
+        client = Network[IO]
+          .connect(serverSocket.address)
           .flatMap(
             tlsContext
               .clientBuilder(_)
@@ -121,7 +123,7 @@ class TLSSocketSuite extends TLSSuite {
               )
               .build
           )
-      } yield server.flatMap(s => Stream.resource(tlsContext.server(s))) -> client
+      } yield serverSocket.accept.flatMap(s => Stream.resource(tlsContext.server(s))) -> client
 
       Stream
         .resource(setup)
@@ -130,9 +132,10 @@ class TLSSocketSuite extends TLSSuite {
             socket.reads.chunks.foreach(socket.write(_))
           }.parJoinUnbounded
 
-          val client =
+          val client = Stream.resource(clientSocket).flatMap { clientSocket =>
             Stream.exec(clientSocket.write(msg)) ++
               clientSocket.reads.take(msg.size.toLong)
+          }
 
           client.concurrently(echoServer)
         }
@@ -146,10 +149,9 @@ class TLSSocketSuite extends TLSSuite {
 
       val setup = for {
         tlsContext <- Resource.eval(Network[IO].tlsContext.system)
-        addressAndConnections <- Network[IO].serverResource(Some(ip"127.0.0.1"))
-        (serverAddress, server) = addressAndConnections
-        client <- Network[IO]
-          .client(serverAddress)
+        serverSocket <- Network[IO].bind(SocketAddress(ip"127.0.0.1", Port.Wildcard))
+        client = Network[IO]
+          .connect(serverSocket.address)
           .flatMap(
             tlsContext
               .clientBuilder(_)
@@ -160,7 +162,7 @@ class TLSSocketSuite extends TLSSuite {
               )
               .build
           )
-      } yield server.flatMap(s => Stream.resource(tlsContext.server(s))) -> client
+      } yield serverSocket.accept.flatMap(s => Stream.resource(tlsContext.server(s))) -> client
 
       Stream
         .resource(setup)
@@ -169,9 +171,10 @@ class TLSSocketSuite extends TLSSuite {
             socket.reads.chunks.foreach(socket.write(_))
           }.parJoinUnbounded
 
-          val client =
+          val client = Stream.resource(clientSocket).flatMap { clientSocket =>
             Stream.exec(clientSocket.write(msg)) ++
               clientSocket.reads.take(msg.size.toLong)
+          }
 
           client.concurrently(echoServer)
         }
@@ -180,5 +183,216 @@ class TLSSocketSuite extends TLSSuite {
         .intercept[SSLException]
     }
 
+    test("mTLS client verification") { // GHSA-2cpx-6pqp-wf35
+      val msg = Chunk.array(("Hello, world! " * 20000).getBytes)
+
+      val setup = for {
+        serverContext <- Resource.eval(testTlsContext(true))
+        clientContext <- Resource.eval(testTlsContext(false))
+        serverSocket <- Network[IO].bind(SocketAddress(ip"127.0.0.1", Port.Wildcard))
+        client = Network[IO]
+          .connect(serverSocket.address)
+          .flatMap(
+            clientContext
+              .clientBuilder(_)
+              .withParameters(
+                TLSParameters(checkServerIdentity =
+                  Some((sn, _) => Either.cond(sn == "localhost", (), new RuntimeException()))
+                )
+              )
+              .build
+          )
+      } yield serverSocket.accept.flatMap(s =>
+        Stream.resource(
+          serverContext
+            .serverBuilder(s)
+            .withParameters(TLSParameters(requestCert = true.some)) // mTLS
+            .build
+        )
+      ) -> client
+
+      Stream
+        .resource(setup)
+        .flatMap { case (server, clientSocket) =>
+          val echoServer = server.map { socket =>
+            socket.reads.chunks.foreach(socket.write(_))
+          }.parJoinUnbounded
+
+          val client = Stream.resource(clientSocket).flatMap { clientSocket =>
+            Stream.exec(clientSocket.write(msg)) ++
+              clientSocket.reads.take(msg.size.toLong)
+          }
+
+          client.concurrently(echoServer)
+        }
+        .compile
+        .to(Chunk)
+        .intercept[SSLException]
+    }
+
+    List(`TLSv1.2`, `TLSv1.3`).foreach { protocol =>
+      test(s"$protocol - applicationProtocol and session") {
+        val msg = Chunk.array(("Hello, world! " * 20000).getBytes)
+
+        val setup = for {
+          tlsContext <- Resource.eval(testTlsContext(true, Some(protocol)))
+          serverSocket <- Network[IO].bind(SocketAddress(ip"127.0.0.1", Port.Wildcard))
+          client = Network[IO]
+            .connect(serverSocket.address)
+            .flatMap(
+              tlsContext
+                .clientBuilder(_)
+                .withParameters(
+                  TLSParameters(
+                    checkServerIdentity =
+                      Some((sn, _) => Either.cond(sn == "localhost", (), new RuntimeException())),
+                    alpnProtocols = Some(List("h2"))
+                  )
+                )
+                .build
+            )
+        } yield serverSocket.accept.flatMap(s =>
+          Stream.resource(
+            tlsContext
+              .serverBuilder(s)
+              .withParameters(TLSParameters(alpnProtocols = Some(List("h2"))))
+              .build
+          )
+        ) -> client
+
+        Stream
+          .resource(setup)
+          .flatMap { case (server, clientSocket) =>
+            val echoServer = server
+              .evalTap(s => s.applicationProtocol.assertEquals("h2"))
+              .flatMap { socket =>
+                Stream
+                  .eval(socket.session)
+                  .concurrently(socket.reads.chunks.foreach(socket.write(_)))
+              }
+
+            val client = Stream.resource(clientSocket).flatMap { clientSocket =>
+              Stream.exec(clientSocket.applicationProtocol.assertEquals("h2")) ++
+                Stream.exec(clientSocket.session.void) ++
+                Stream.exec(clientSocket.write(msg)) ++
+                Stream.eval(clientSocket.readN(msg.size).assertEquals(msg))
+            }
+
+            client.parZip(echoServer)
+          }
+          .compile
+          .drain
+      }
+    }
+
+    test("echo insecure client") {
+      val msg = Chunk.array(("Hello, world! " * 20000).getBytes)
+
+      val setup = for {
+        clientContext <- Resource.eval(Network[IO].tlsContext.insecure)
+        tlsContext <- Resource.eval(testTlsContext(true))
+        serverSocket <- Network[IO].bind(SocketAddress(ip"127.0.0.1", Port.Wildcard))
+        client = Network[IO]
+          .connect(serverSocket.address)
+          .flatMap(s =>
+            clientContext
+              .clientBuilder(s)
+              .build
+          )
+      } yield serverSocket.accept.flatMap(s => Stream.resource(tlsContext.server(s))) -> client
+
+      Stream
+        .resource(setup)
+        .flatMap { case (server, clientSocket) =>
+          val echoServer = server.map { socket =>
+            socket.reads.chunks.foreach(socket.write(_))
+          }.parJoinUnbounded
+
+          val client = Stream.resource(clientSocket).flatMap { clientSocket =>
+            Stream.exec(clientSocket.write(msg)) ++
+              clientSocket.reads.take(msg.size.toLong)
+          }
+
+          client.concurrently(echoServer)
+        }
+        .compile
+        .to(Chunk)
+        .assertEquals(msg)
+    }
+
+    test("do not hang on SSL connect failure") {
+      val msg = Chunk.array(("Hello, world! " * 20000).getBytes)
+
+      val setup = for {
+        clientContext <- Resource.eval(Network[IO].tlsContext.system)
+        tlsContext <- Resource.eval(testTlsContext(true))
+        serverSocket <- Network[IO].bind(SocketAddress(ip"127.0.0.1", Port.Wildcard))
+        client = Network[IO]
+          .connect(serverSocket.address)
+          .flatMap(s =>
+            clientContext
+              .clientBuilder(s)
+              .build
+          )
+      } yield serverSocket.accept.flatMap(s => Stream.resource(tlsContext.server(s))) -> client
+
+      Stream
+        .resource(setup)
+        .flatMap { case (server, clientSocket) =>
+          val echoServer = server.map { socket =>
+            socket.reads.chunks.foreach(socket.write(_))
+          }.parJoinUnbounded
+
+          val client = Stream.resource(clientSocket).flatMap { clientSocket =>
+            Stream.exec(clientSocket.write(msg)) ++
+              clientSocket.reads.take(msg.size.toLong)
+          }
+
+          client.concurrently(echoServer)
+        }
+        .compile
+        .to(Chunk)
+        .intercept[SSLException]
+    }
+
+    test("get local and remote address") {
+      val setup = for {
+        tlsContext <- Resource.eval(testTlsContext(true))
+        serverSocket <- Network[IO].bind(SocketAddress(ip"127.0.0.1", Port.Wildcard))
+        client = Network[IO]
+          .connect(serverSocket.address)
+          .flatMap(
+            tlsContext
+              .clientBuilder(_)
+              .withParameters(
+                TLSParameters(checkServerIdentity =
+                  Some((sn, _) => Either.cond(sn == "localhost", (), new RuntimeException()))
+                )
+              )
+              .build
+          )
+      } yield serverSocket.accept.flatMap(s => Stream.resource(tlsContext.server(s))) -> client
+
+      Stream
+        .resource(setup)
+        .flatMap { case (server, clientSocket) =>
+          val serverSocketAddresses = server.map { socket =>
+            socket.address -> socket.peerAddress
+          }
+
+          val clientSocketAddresses =
+            Stream.resource(clientSocket).map { socket =>
+              socket.address -> socket.peerAddress
+            }
+
+          serverSocketAddresses.parZip(clientSocketAddresses).map {
+            case ((serverLocal, serverRemote), (clientLocal, clientRemote)) =>
+              assertEquals(clientRemote, serverLocal)
+              assertEquals(clientLocal, serverRemote)
+          }
+        }
+        .compile
+        .drain
+    }
   }
 }

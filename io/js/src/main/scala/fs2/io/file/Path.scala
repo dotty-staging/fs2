@@ -27,7 +27,7 @@ import fs2.io.internal.facade
 
 import scala.annotation.tailrec
 
-final case class Path private (override val toString: String) extends PathApi {
+final case class Path private[file] (override val toString: String) extends PathApi {
 
   def /(name: String): Path =
     if (toString.isEmpty & name.isEmpty)
@@ -98,9 +98,13 @@ final case class Path private (override val toString: String) extends PathApi {
 object Path extends PathCompanionApi {
   private[file] val sep = facade.path.sep
 
-  def apply(path: String): Path =
-    if (path.endsWith(sep))
-      new Path(path.dropRight(sep.length))
-    else
-      new Path(path)
+  def apply(path: String): Path = {
+    // Parse and then reconstruct the path
+    // to drop all trailing separators
+    // to match `java.nio.file.Paths.get` behaviour.
+    val parsed = facade.path.parse(path)
+    val formatted = facade.path.format(parsed)
+
+    new Path(formatted)
+  }
 }

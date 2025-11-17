@@ -21,11 +21,10 @@
 
 package fs2
 
-import scala.concurrent.duration._
-
+import scala.concurrent.duration.*
 import cats.effect.IO
 import cats.effect.kernel.{Deferred, Ref}
-import cats.syntax.all._
+import cats.effect.testkit.TestControl
 import org.scalacheck.effect.PropF.forAllF
 
 class StreamMergeSuite extends Fs2Suite {
@@ -116,7 +115,7 @@ class StreamMergeSuite extends Fs2Suite {
                       .merge(
                         Stream.bracket(register("R"))(_ => finalizer("R")) >>
                           Stream
-                            .eval(halt.complete(())) // immediately interrupt the outer stream
+                            .exec(halt.complete(()).void) // immediately interrupt the outer stream
                       )
                   }
                   .interruptWhen(halt.get.attempt)
@@ -157,7 +156,7 @@ class StreamMergeSuite extends Fs2Suite {
 
     group("hangs") {
       val full = if (isJVM) Stream.constant(42) else Stream.constant(42).evalTap(_ => IO.cede)
-      val hang = Stream.repeatEval(IO.never[Unit])
+      val hang = Stream.repeatEval(IO.never[Nothing])
       val hang2: Stream[IO, Nothing] = full.drain
       val hang3: Stream[IO, Nothing] =
         Stream
@@ -225,7 +224,7 @@ class StreamMergeSuite extends Fs2Suite {
     }
   }
 
-  test("merge not emit ahead") {
+  test("merge not emit ahead more than 1 chunk") {
     forAllF { (v: Int) =>
       Ref
         .of[IO, Int](v)
@@ -237,9 +236,100 @@ class StreamMergeSuite extends Fs2Suite {
             .repeatEval(ref.get)
             .merge(Stream.never[IO])
             .evalMap(sleepAndSet)
-            .take(2)
-            .assertEmits(List(v, v + 1))
+            .take(6)
+            .assertEmits(List(v, v, v + 1, v + 1, v + 2, v + 2))
         }
     }
+  }
+
+  test("mergeAndAwaitDownstream not emit ahead") {
+    forAllF { (v: Int) =>
+      Ref
+        .of[IO, Int](v)
+        .flatMap { ref =>
+          def sleepAndSet(value: Int): IO[Int] =
+            IO.sleep(100.milliseconds) >> ref.set(value + 1) >> IO(value)
+
+          Stream
+            .repeatEval(ref.get)
+            .mergeAndAwaitDownstream(Stream.never[IO])
+            .evalMap(sleepAndSet)
+            .take(3)
+            .assertEmits(List(v, v + 1, v + 2))
+        }
+    }
+  }
+
+  test("merge produces when concurrently handled") {
+
+    // Create stream for each int that comes in,
+    // then run them in parallel
+    // Where we return the int value and then wait (Simulating some work that never ends, or ends in long time.).
+    def run(source: Stream[IO, Int]): IO[Vector[Int]] =
+      source
+        .map { a =>
+          Stream.emit(a) ++
+            Stream.never[IO]
+        }
+        .parJoinUnbounded
+        .timeoutOnPullTo(200.millis, Stream.empty)
+        .compile
+        .toVector
+
+    TestControl
+      .executeEmbed(
+        run(
+          (Stream.emit(1) ++ Stream.sleep_[IO](50.millis) ++ Stream.emit(2)).merge(
+            Stream.never[IO]
+          )
+        )
+      )
+      .assertEquals(Vector(1, 2))
+  }
+
+  test("issue #3598") {
+
+    sealed trait Data
+
+    case class Item(value: Int) extends Data
+    case object Tick1 extends Data
+    case object Tick2 extends Data
+
+    def splitHead[F[_], O](in: fs2.Stream[F, O]): fs2.Stream[F, (O, fs2.Stream[F, O])] =
+      in.pull.uncons1.flatMap {
+        case Some((head, tail)) => fs2.Pull.output(Chunk((head, tail)))
+        case None               => fs2.Pull.done
+      }.stream
+
+    val source =
+      Stream.emits(1 to 2).evalMap(i => IO(Item(i)).delayBy(100.millis)) ++ Stream.never[IO]
+
+    val timer = fs2.Stream.awakeEvery[IO](50.millis).map(_ => Tick1)
+    val timer2 = fs2.Stream.awakeEvery[IO](50.millis).map(_ => Tick2)
+
+    val sources = timer2.mergeHaltBoth(source.mergeHaltBoth(timer))
+
+    val program =
+      splitHead(sources)
+        .flatMap { case (head, tail) =>
+          splitHead(tail)
+            .flatMap { case (head2, tail) =>
+              Stream.emit(head) ++ Stream.emit(head2) ++ tail
+            }
+            .parEvalMap(3) { i =>
+              IO(i)
+            }
+        }
+        .interruptAfter(230.millis)
+        .compile
+        .toVector
+
+    TestControl
+      .executeEmbed(program)
+      .assert { data =>
+        data.count(_.isInstanceOf[Item]) == 2 &&
+        data.count(_.isInstanceOf[Tick1.type]) == 4 &&
+        data.count(_.isInstanceOf[Tick2.type]) == 4
+      }
   }
 }

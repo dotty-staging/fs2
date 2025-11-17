@@ -21,38 +21,57 @@
 
 package fs2.io.internal.facade
 
+import org.typelevel.scalaccompat.annotation._
+
 import scala.annotation.nowarn
 import scala.scalajs.js
 import scala.scalajs.js.annotation.JSImport
 import scala.scalajs.js.typedarray.Uint8Array
 
-package object fs {
+@nowarn212("cat=unused")
+private[io] object fs {
 
   @js.native
   @JSImport("fs", "constants")
-  private[io] def constants: FsConstants = js.native
+  def constants: FsConstants = js.native
 
   @js.native
   @JSImport("fs", "promises")
-  private[io] def promises: FsPromises = js.native
+  def promises: FsPromises = js.native
 
   @js.native
   @JSImport("fs", "createReadStream")
-  @nowarn
-  private[io] def createReadStream(path: String, options: ReadStreamOptions): fs2.io.Readable =
+  def createReadStream(path: String, options: ReadStreamOptions): fs2.io.Readable =
     js.native
 
   @js.native
   @JSImport("fs", "createWriteStream")
-  @nowarn
-  private[io] def createWriteStream(path: String, options: WriteStreamOptions): fs2.io.Writable =
+  def createWriteStream(path: String, options: WriteStreamOptions): fs2.io.Writable =
     js.native
 
-}
+  @js.native
+  @JSImport("fs", "read")
+  def read(
+      fd: Int,
+      buffer: Uint8Array,
+      offset: Int,
+      length: Int,
+      position: js.BigInt,
+      cb: js.Function3[js.Error, Int, Uint8Array, Unit]
+  ): Unit = js.native
 
-package fs {
+  @js.native
+  @JSImport("fs", "write")
+  def write(
+      fd: Int,
+      buffer: Uint8Array,
+      offset: Int,
+      length: Int,
+      position: js.BigInt,
+      cb: js.Function3[js.Error, Int, Uint8Array, Unit]
+  ): Unit = js.native
 
-  private[io] trait ReadStreamOptions extends js.Object {
+  trait ReadStreamOptions extends js.Object {
 
     var flags: js.UndefOr[Double] = js.undefined
 
@@ -64,7 +83,7 @@ package fs {
 
   }
 
-  private[io] trait WriteStreamOptions extends js.Object {
+  trait WriteStreamOptions extends js.Object {
 
     var flags: js.UndefOr[Double] = js.undefined
 
@@ -72,7 +91,7 @@ package fs {
 
   @js.native
   @nowarn
-  private[io] trait FsConstants extends js.Object {
+  trait FsConstants extends js.Object {
 
     val COPYFILE_EXCL: Double = js.native
 
@@ -98,15 +117,17 @@ package fs {
 
     val O_EXCL: Double = js.native
 
-    val O_SYNC: Double = js.native
+    // UndefOr, because windows (:
 
-    val O_DSYNC: Double = js.native
+    val O_SYNC: js.UndefOr[Double] = js.native
+
+    val O_DSYNC: js.UndefOr[Double] = js.native
 
   }
 
   @js.native
   @nowarn
-  private[io] trait FsPromises extends js.Object {
+  trait FsPromises extends js.Object {
 
     def access(path: String, mode: Double = js.native): js.Promise[Unit] = js.native
 
@@ -116,7 +137,7 @@ package fs {
 
     def lchmod(path: String, mode: Double): js.Promise[Unit] = js.native
 
-    def lstat(path: String): js.Promise[Stats] = js.native
+    def lstat(path: String, options: StatOptions): js.Promise[BigIntStats] = js.native
 
     def mkdir(path: String, options: MkdirOptions): js.Promise[js.UndefOr[String]] = js.native
 
@@ -135,15 +156,17 @@ package fs {
 
     def rmdir(path: String): js.Promise[Unit] = js.native
 
-    def stat(path: String): js.Promise[Stats] = js.native
+    def stat(path: String, options: StatOptions): js.Promise[BigIntStats] = js.native
 
     def symlink(target: String, path: String): js.Promise[Unit] = js.native
+
+    def link(target: String, path: String): js.Promise[Unit] = js.native
 
     def utimes(path: String, atime: Double, mtime: Double): js.Promise[Unit] = js.native
 
   }
 
-  private[io] trait MkdirOptions extends js.Object {
+  trait MkdirOptions extends js.Object {
 
     var recursive: js.UndefOr[Boolean] = js.undefined
 
@@ -151,7 +174,7 @@ package fs {
 
   }
 
-  private[io] trait RmOptions extends js.Object {
+  trait RmOptions extends js.Object {
 
     var force: js.UndefOr[Boolean] = js.undefined
 
@@ -159,8 +182,14 @@ package fs {
 
   }
 
+  trait StatOptions extends js.Object {
+
+    var bigint: js.UndefOr[Boolean] = js.undefined
+
+  }
+
   @js.native
-  private[io] trait Dir extends js.Object {
+  trait Dir extends js.Object {
 
     def close(): js.Promise[Unit] = js.native
 
@@ -169,28 +198,34 @@ package fs {
   }
 
   @js.native
-  private[io] trait DirEnt extends js.Object {
+  trait DirEnt extends js.Object {
 
     def name: String = js.native
 
   }
 
   @js.native
-  private[io] trait Stats extends js.Object {
+  trait BigIntStats extends js.Object {
 
-    def dev: Double = js.native
+    def dev: js.BigInt = js.native
 
-    def ino: Double = js.native
+    def ino: js.BigInt = js.native
 
-    def mode: Double = js.native
+    def mode: js.BigInt = js.native
 
-    def size: Double = js.native
+    def size: js.BigInt = js.native
 
-    def atimeMs: Double = js.native
+    def atimeMs: js.BigInt = js.native
 
-    def ctimeMs: Double = js.native
+    def ctimeMs: js.BigInt = js.native
 
-    def mtimeMs: Double = js.native
+    def mtimeMs: js.BigInt = js.native
+
+    def atimeNs: js.BigInt = js.native
+
+    def ctimeNs: js.BigInt = js.native
+
+    def mtimeNs: js.BigInt = js.native
 
     def isFile(): Boolean = js.native
 
@@ -201,26 +236,13 @@ package fs {
   }
 
   @js.native
-  @nowarn
-  private[io] trait FileHandle extends js.Object {
+  trait FileHandle extends js.Object {
+
+    def fd: Int = js.native
 
     def datasync(): js.Promise[Unit] = js.native
 
-    def read(
-        buffer: Uint8Array,
-        offset: Int,
-        length: Int,
-        position: Double
-    ): js.Promise[FileHandleReadResult] = js.native
-
-    def write(
-        buffer: Uint8Array,
-        offset: Int,
-        length: Int,
-        position: Double
-    ): js.Promise[FileHandleWriteResult] = js.native
-
-    def stat(): js.Promise[Stats] = js.native
+    def stat(options: StatOptions): js.Promise[BigIntStats] = js.native
 
     def truncate(len: Double): js.Promise[Unit] = js.native
 
@@ -229,7 +251,7 @@ package fs {
   }
 
   @js.native
-  private[io] trait FileHandleReadResult extends js.Object {
+  trait FileHandleReadResult extends js.Object {
 
     def bytesRead: Int = js.native
 
@@ -238,7 +260,7 @@ package fs {
   }
 
   @js.native
-  private[io] trait FileHandleWriteResult extends js.Object {
+  trait FileHandleWriteResult extends js.Object {
 
     def bytesWritten: Int = js.native
 

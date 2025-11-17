@@ -40,7 +40,9 @@ import cats.syntax.all._
 import com.comcast.ip4s.{IpAddress, SocketAddress}
 
 import java.util.function.BiFunction
-import java.nio.file.Path
+import java.nio.file.{Path => JPath}
+
+import fs2.io.file.Path
 
 private[tls] trait TLSContextPlatform[F[_]] {
 
@@ -100,11 +102,18 @@ private[tls] trait TLSContextCompanionPlatform { self: TLSContext.type =>
 
   private[tls] trait BuilderPlatform[F[_]] {
     def fromSSLContext(ctx: SSLContext): TLSContext[F]
-
-    /** Creates a `TLSContext` which trusts all certificates. */
+    def system: F[TLSContext[F]]
     def insecure: F[TLSContext[F]]
 
     /** Creates a `TLSContext` from the specified key store file. */
+    @deprecated("Use overload that takes an fs2.io.file.Path instead", "3.13.0")
+    def fromKeyStoreFile(
+        file: JPath,
+        storePassword: Array[Char],
+        keyPassword: Array[Char]
+    ): F[TLSContext[F]] =
+      fromKeyStoreFile(Path.fromNioPath(file), storePassword, keyPassword)
+
     def fromKeyStoreFile(
         file: Path,
         storePassword: Array[Char],
@@ -128,7 +137,7 @@ private[tls] trait TLSContextCompanionPlatform { self: TLSContext.type =>
   private[tls] trait BuilderCompanionPlatform {
 
     /** Creates a `TLSContext` from an `SSLContext`. */
-    private[tls] final class AsyncBuilder[F[_]: Async] extends Builder[F] {
+    private[tls] final class AsyncBuilder[F[_]: Async] extends UnsealedBuilder[F] {
 
       def fromSSLContext(
           ctx: SSLContext
@@ -187,7 +196,7 @@ private[tls] trait TLSContextCompanionPlatform { self: TLSContext.type =>
                   new TLSEngine.Binding[F] {
                     def write(data: Chunk[Byte]): F[Unit] =
                       if (data.isEmpty) Applicative[F].unit
-                      else socket.write(Datagram(remoteAddress, data))
+                      else socket.write(data, remoteAddress)
                     def read(maxBytes: Int): F[Option[Chunk[Byte]]] =
                       socket.read.map(p => Some(p.bytes))
                   },
@@ -262,15 +271,21 @@ private[tls] trait TLSContextCompanionPlatform { self: TLSContext.type =>
           }
           .map(fromSSLContext(_))
 
+      def insecureResource: Resource[F, TLSContext[F]] =
+        Resource.eval(insecure)
+
       def system: F[TLSContext[F]] =
         Async[F].blocking(SSLContext.getDefault).map(fromSSLContext(_))
+
+      def systemResource: Resource[F, TLSContext[F]] =
+        Resource.eval(system)
 
       def fromKeyStoreFile(
           file: Path,
           storePassword: Array[Char],
           keyPassword: Array[Char]
       ): F[TLSContext[F]] = {
-        val load = Async[F].blocking(new FileInputStream(file.toFile): InputStream)
+        val load = Async[F].blocking(new FileInputStream(file.toNioPath.toFile): InputStream)
         val stream = Resource.make(load)(s => Async[F].blocking(s.close))
         fromKeyStoreStream(stream, storePassword, keyPassword)
       }
@@ -280,7 +295,11 @@ private[tls] trait TLSContextCompanionPlatform { self: TLSContext.type =>
           storePassword: Array[Char],
           keyPassword: Array[Char]
       ): F[TLSContext[F]] = {
-        val load = Async[F].blocking(getClass.getClassLoader.getResourceAsStream(resource))
+        val load = Async[F].blocking {
+          val s = getClass.getClassLoader.getResourceAsStream(resource)
+          if (s eq null) throw new IOException(s"Classpath resource not found [$resource]")
+          else s
+        }
         val stream = Resource.make(load)(s => Async[F].blocking(s.close))
         fromKeyStoreStream(stream, storePassword, keyPassword)
       }

@@ -23,9 +23,9 @@ package fs2
 package interop
 package reactivestreams
 
-import org.reactivestreams._
-import cats.effect._
-import cats.effect.std.Dispatcher
+import cats.effect.IO
+import cats.syntax.all._
+import org.reactivestreams.{Subscriber, Subscription}
 
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -35,52 +35,44 @@ import java.util.concurrent.atomic.AtomicBoolean
   * failures due to race conditions more repeatable
   */
 class CancellationSpec extends Fs2Suite {
-
-  case class Sub[A](b: AtomicBoolean) extends Subscriber[A] {
+  final class Sub[A](b: AtomicBoolean) extends Subscriber[A] {
     def onNext(t: A) = b.set(true)
     def onComplete() = b.set(true)
     def onError(e: Throwable) = b.set(true)
-    def onSubscribe(s: Subscription) = b.set(true)
+    def onSubscribe(s: Subscription) = ()
   }
 
   val s = Stream.range(0, 5).covary[IO]
 
-  val attempts = 10000
+  val attempts = 1000
 
-  def withDispatcher(f: Dispatcher[IO] => Unit): Unit =
-    Dispatcher[IO]
-      .use(dispatcher => IO(f(dispatcher)))
-      .unsafeRunSync()
-
-  test("after subscription is cancelled request must be noOps") {
-    withDispatcher { dispatcher =>
-      var i = 0
-      val b = new AtomicBoolean(false)
-      while (i < attempts) {
-        val sub = StreamSubscription(Sub[Int](b), s, dispatcher).unsafeRunSync()
-        sub.unsafeStart()
-        sub.cancel()
-        sub.request(1)
-        sub.request(1)
-        sub.request(1)
-        i = i + 1
+  def testStreamSubscription(clue: String)(program: Subscription => Unit): IO[Unit] =
+    IO(new AtomicBoolean(false))
+      .flatMap { flag =>
+        StreamSubscription(s, new Sub(flag)).use { subscription =>
+          (
+            subscription.run,
+            IO(program(subscription))
+          ).parTupled
+        } >>
+          IO(flag.get()).assertEquals(false, clue)
       }
-      if (b.get) fail("onNext was called after the subscription was cancelled")
+      .replicateA_(attempts)
+
+  test("After subscription is canceled request must be NOOPs") {
+    testStreamSubscription(clue = "onNext was called after the subscription was canceled") { sub =>
+      sub.cancel()
+      sub.request(1)
+      sub.request(1)
+      sub.request(1)
     }
   }
 
-  test("after subscription is cancelled additional cancelations must be noOps") {
-    withDispatcher { dispatcher =>
-      var i = 0
-      val b = new AtomicBoolean(false)
-      while (i < attempts) {
-        val sub = StreamSubscription(Sub[Int](b), s, dispatcher).unsafeRunSync()
-        sub.unsafeStart()
+  test("after subscription is canceled additional cancellations must be NOOPs") {
+    testStreamSubscription(clue = "onComplete was called after the subscription was canceled") {
+      sub =>
         sub.cancel()
         sub.cancel()
-        i = i + 1
-      }
-      if (b.get) fail("onCancel was called after the subscription was cancelled")
     }
   }
 }

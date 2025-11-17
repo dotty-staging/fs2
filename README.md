@@ -11,7 +11,7 @@ FS2 is a library for purely functional, effectful, and polymorphic stream proces
 Its design goals are compositionality, expressiveness, resource safety, and speed.
 The name is a modified acronym for **F**unctional **S**treams for **Scala** (FSS, or FS2).
 
-FS2 is available for Scala 2.12, Scala 2.13, Scala 3, and [Scala.js](http://www.scala-js.org/).
+FS2 is available for Scala 2.12, Scala 2.13, Scala 3, and [Scala.js](http://www.scala-js.org/) and [Scala Native](https://scala-native.org/).
 FS2 is built upon two major functional libraries for Scala, [Cats](https://typelevel.org/cats/), and [Cats-Effect](https://typelevel.org/cats-effect/).
 Regardless of those dependencies, FS2 core types (streams and pulls) are polymorphic in the effect type (as long as it is compatible with `cats-effect` typeclasses),
 and thus FS2 can be used with other effect libraries, such as [Monix](https://monix.io/).
@@ -28,12 +28,10 @@ Quick links:
 
 [microsite]: http://fs2.io
 [api]: https://www.javadoc.io/doc/co.fs2/fs2-docs_2.13/latest/fs2/index.html
-[io-api]: https://oss.sonatype.org/service/local/repositories/releases/archive/co/fs2/fs2-io_2.13/3.1.0/fs2-io_2.13-3.1.0-javadoc.jar/!/fs2/io/index.html
-[rx-api]: https://oss.sonatype.org/service/local/repositories/releases/archive/co/fs2/fs2-reactive-streams_2.13/3.1.0/fs2-reactive-streams_2.13-3.1.0-javadoc.jar/!/fs2/interop/reactivestreams/index.html
 
 ### <a id="docs"></a>Documentation and getting help ###
 
-* There are Scaladoc API documentations for [the core library][core-api], which defines and implements the core types for streams and pulls, as well as the type aliases for pipes and sinks. [The `io` library][io-api] provides FS2 bindings for NIO-based file I/O and TCP/UDP networking.
+* There are [Scaladoc API documentations][api] for the library.
 * [The official guide](https://fs2.io/#/guide) is a good starting point for learning more about the library.
 * The [documentation page](https://fs2.io/#/documentation) is intended to serve as a list of all references, including conference presentation recordings, academic papers, and blog posts, on the use and implementation of `fs2`.
 * [The FAQ](https://fs2.io/#/faq) has frequently asked questions. Feel free to open issues or PRs with additions to the FAQ!

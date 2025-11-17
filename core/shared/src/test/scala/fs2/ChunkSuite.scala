@@ -27,7 +27,11 @@ import cats.kernel.laws.discipline.EqTests
 import cats.laws.discipline.{AlternativeTests, MonadTests, TraverseFilterTests, TraverseTests}
 import org.scalacheck.{Arbitrary, Cogen, Gen, Test}
 import org.scalacheck.Prop.forAll
+import scodec.bits.ByteVector
 
+import java.nio.ByteBuffer
+import java.nio.CharBuffer
+import java.util.concurrent.atomic.AtomicInteger
 import scala.reflect.ClassTag
 
 class ChunkSuite extends Fs2Suite {
@@ -43,33 +47,97 @@ class ChunkSuite extends Fs2Suite {
     }
 
     property("chunk-formation (2)") {
-      forAll { (c: Vector[Int]) =>
-        assertEquals(Chunk.seq(c).toVector, c)
-        assertEquals(Chunk.seq(c).toList, c.toList)
-        assertEquals(Chunk.indexedSeq(c).toVector, c)
-        assertEquals(Chunk.indexedSeq(c).toList, c.toList)
+      forAll { (v: Vector[Int]) =>
+        assertEquals(Chunk.from(v).toVector, v)
+        assertEquals(Chunk.from(v).toList, v.toList)
       }
     }
 
     test("Chunk.apply is optimized") {
-      assert(Chunk(1).isInstanceOf[Chunk.Singleton[_]])
-      assert(Chunk("Hello").isInstanceOf[Chunk.Singleton[_]])
+      assert(Chunk(1).isInstanceOf[Chunk.Singleton[?]])
+      assert(Chunk("Hello").isInstanceOf[Chunk.Singleton[?]])
       // Varargs on Scala.js use a scala.scalajs.js.WrappedArray, which
       // ends up falling through to the Chunk.indexedSeq constructor
       if (isJVM) {
-        assert(Chunk(1, 2, 3).isInstanceOf[Chunk.ArraySlice[_]])
-        assert(Chunk("Hello", "world").isInstanceOf[Chunk.ArraySlice[_]])
+        assert(Chunk(1, 2, 3).isInstanceOf[Chunk.ArraySlice[?]])
+        assert(Chunk("Hello", "world").isInstanceOf[Chunk.ArraySlice[?]])
       }
     }
 
-    test("Chunk.seq is optimized") {
-      assert(Chunk.seq(List(1)).isInstanceOf[Chunk.Singleton[_]])
+    test("Chunk.from is optimized") {
+      assert(Chunk.from(List(1)).isInstanceOf[Chunk.Singleton[?]])
+      assert(Chunk.from(Vector(1)).isInstanceOf[Chunk.Singleton[?]])
     }
 
-    test("Array casts in Chunk.seq are safe") {
+    test("Array casts in Chunk.from are safe") {
       val as = collection.mutable.ArraySeq[Int](0, 1, 2)
-      val c = Chunk.seq(as)
-      assert(c.isInstanceOf[Chunk.ArraySlice[_]])
+      val c = Chunk.from(as)
+      assert(c.isInstanceOf[Chunk.ArraySlice[?]])
+    }
+
+    test("Chunk.asSeq roundtrip") {
+      forAll { (c: Chunk[Int]) =>
+        // Chunk -> Seq -> Chunk
+        val seq = c.asSeq
+        val result = Chunk.from(seq)
+
+        // Check data consistency.
+        assertEquals(result, c)
+
+        // Check unwrap.
+        if (seq.isInstanceOf[ChunkAsSeq[?]]) {
+          assert(result eq c)
+        }
+      } && forAll { (e: Either[Seq[Int], Vector[Int]]) =>
+        // Seq -> Chunk -> Seq
+        val seq = e.merge
+        val chunk = Chunk.from(seq)
+        val result = chunk.asSeq
+
+        // Check data consistency.
+        assertEquals(result, seq)
+
+        // Check unwrap.
+        if (seq.isInstanceOf[Vector[?]] && chunk.size >= 2) {
+          assert(result eq seq)
+        }
+      }
+    }
+
+    test("Chunk.javaList unwraps asJava") {
+      forAll { (c: Chunk[Int]) =>
+        assert(Chunk.javaList(c.asJava) eq c)
+      }
+    }
+
+    test("Chunk.collect behaves as filter + map") {
+      forAll { (c: Chunk[Int]) =>
+        val extractor = new OddStringExtractor
+        val pf: PartialFunction[Int, String] = { case extractor(s) => s }
+
+        val result = c.collect(pf)
+
+        assertEquals(result, c.filter(pf.isDefinedAt).map(pf))
+      }
+    }
+
+    test("Chunk.collect evaluates pattern matchers once per item") {
+      forAll { (c: Chunk[Int]) =>
+        val extractor = new OddStringExtractor
+
+        val _ = c.collect { case extractor(s) => s }
+
+        assertEquals(extractor.callCounter.get(), c.size)
+      }
+    }
+
+    class OddStringExtractor {
+      val callCounter: AtomicInteger = new AtomicInteger(0)
+
+      def unapply(i: Int): Option[String] = {
+        callCounter.incrementAndGet()
+        if (i % 2 != 0) Some(i.toString) else None
+      }
     }
   }
 
@@ -81,7 +149,11 @@ class ChunkSuite extends Fs2Suite {
   ): Unit =
     group(s"$name") {
       implicit val implicitChunkArb: Arbitrary[Chunk[A]] = Arbitrary(genChunk)
-      property("size")(forAll((c: Chunk[A]) => assertEquals(c.size, c.toList.size)))
+      property("size") {
+        forAll { (c: Chunk[A]) =>
+          assertEquals(c.size, c.toList.size)
+        }
+      }
       property("take") {
         forAll { (c: Chunk[A], n: Int) =>
           assertEquals(c.take(n).toVector, c.toVector.take(n))
@@ -133,11 +205,54 @@ class ChunkSuite extends Fs2Suite {
           val listScan = c.toList.scanLeft(List[A]())(step)
           val (chunkScan, chunkCarry) = c.scanLeftCarry(List[A]())(step)
 
-          assertEquals((chunkScan.toList, chunkCarry), ((listScan.tail, listScan.last)))
+          assertEquals((chunkScan.toList, chunkCarry), (listScan.tail, listScan.last))
+        }
+      }
+      property("asSeq") {
+        forAll { (c: Chunk[A]) =>
+          val s = c.asSeq
+          val v = c.toVector
+          val l = c.toList
+
+          // Equality.
+          assertEquals(s, v)
+          assertEquals(s, l: Seq[A])
+
+          // Hashcode.
+          assertEquals(s.hashCode, v.hashCode)
+          assertEquals(s.hashCode, l.hashCode)
+
+          // Copy to array.
+          assertEquals(s.toArray.toVector, v.toArray.toVector)
+          assertEquals(s.toArray.toVector, l.toArray.toVector)
+        }
+      }
+      property("asJava") {
+        forAll { (c: Chunk[A]) =>
+          val view = c.asJava
+          val copy = java.util.Arrays.asList(c.toVector: _*)
+
+          // Equality.
+          assertEquals(view, copy)
+
+          // Hashcode.
+          assertEquals(view.hashCode, copy.hashCode)
+
+          // Copy to array (untyped).
+          assertEquals(view.toArray.toVector, copy.toArray.toVector)
+
+          // Copy to array (typed).
+          val hint = Array.emptyObjectArray.asInstanceOf[Array[A with Object]]
+          val viewArray = view.toArray(hint)
+          val copyArray = copy.toArray(hint)
+          val viewVector: Vector[A] = viewArray.toVector
+          val copyVector: Vector[A] = copyArray.toVector
+          assertEquals(viewVector, copyVector)
+          assertEquals(viewVector, c.toVector)
         }
       }
 
-      if (implicitly[ClassTag[A]] == ClassTag.Byte)
+      if (implicitly[ClassTag[A]] == ClassTag.Byte) {
         property("toByteBuffer.byte") {
           forAll { (c: Chunk[A]) =>
             implicit val ev: A =:= Byte = null.asInstanceOf[A =:= Byte]
@@ -147,6 +262,14 @@ class ChunkSuite extends Fs2Suite {
             assertEquals[Any, Any](arr.toVector, c.toArray.toVector)
           }
         }
+
+        property("toByteVector") {
+          forAll { (c: Chunk[A]) =>
+            implicit val ev: A =:= Byte = null
+            assertEquals[Any, Any](c.toByteVector.toArray.toVector, c.toArray.toVector)
+          }
+        }
+      }
 
       checkAll(s"Eq[Chunk[$of]]", EqTests[Chunk[A]].eqv)
       checkAll("Monad[Chunk]", MonadTests[Chunk].monad[A, A, A])
@@ -170,13 +293,13 @@ class ChunkSuite extends Fs2Suite {
 
   group("scanLeftCarry") {
     test("returns empty and zero for empty Chunk") {
-      assertEquals(Chunk[Int]().scanLeftCarry(0)(_ + _), ((Chunk.empty, 0)))
+      assertEquals(Chunk[Int]().scanLeftCarry(0)(_ + _), (Chunk.empty, 0))
     }
     test("returns first result and first result for singleton") {
-      assertEquals(Chunk(2).scanLeftCarry(1)(_ + _), ((Chunk(3), 3)))
+      assertEquals(Chunk(2).scanLeftCarry(1)(_ + _), (Chunk(3), 3))
     }
     test("returns all results and last result for multiple elements") {
-      assertEquals(Chunk(2, 3).scanLeftCarry(1)(_ + _), ((Chunk(3, 6), 6)))
+      assertEquals(Chunk(2, 3).scanLeftCarry(1)(_ + _), (Chunk(3, 6), 6))
     }
   }
 
@@ -213,11 +336,48 @@ class ChunkSuite extends Fs2Suite {
     Chunk.ArraySlice(Array[Any](0)).asInstanceOf[Chunk[Int]].toArray[Int]
   }
 
-  test("ArraySlice does not copy when chunk is already an ArraySlice instance") {
+  test("ArraySlice toByteVector") {
+    Chunk.ArraySlice(Array[Any](0.toByte)).asInstanceOf[Chunk[Byte]].toByteVector
+  }
+
+  test("toArraySlice does not copy when chunk is already an ArraySlice instance") {
     val chunk: Chunk[Int] = Chunk.ArraySlice(Array(0))
     assert(chunk eq chunk.toArraySlice)
     val chunk2: Chunk[Any] = Chunk.ArraySlice(Array(new Object))
     assert(chunk2 eq chunk2.toArraySlice)
+  }
+
+  test("toArraySlice does not copy when chunk is an array-backed bytevector") {
+    val arr = Array[Byte](0, 1, 2, 3)
+    val chunk: Chunk[Byte] = Chunk.byteVector(ByteVector.view(arr))
+    assert(chunk.toArraySlice.values eq arr)
+  }
+
+  test("ByteVectorChunk#toArraySlice does not throw class cast exception") {
+    val chunk: Chunk[Byte] = Chunk.byteVector(ByteVector.view(Array[Byte](0, 1, 2, 3)))
+    assertEquals(chunk.toArraySlice[Any].values.apply(0), 0)
+  }
+
+  test("toArraySlice does not copy when chunk is an array-backed bytebuffer") {
+    val bb = ByteBuffer.allocate(4)
+    val chunk: Chunk[Byte] = Chunk.byteBuffer(bb)
+    assert(chunk.toArraySlice.values eq bb.array)
+  }
+
+  test("ByteBuffer#toArraySlice does not throw class cast exception") {
+    val chunk: Chunk[Byte] = Chunk.byteBuffer(ByteBuffer.allocate(4))
+    assertEquals(chunk.toArraySlice[Any].values.apply(0), 0)
+  }
+
+  test("toArraySlice does not copy when chunk is an array-backed charbuffer") {
+    val cb = CharBuffer.allocate(4)
+    val chunk: Chunk[Char] = Chunk.charBuffer(cb)
+    assert(chunk.toArraySlice.values eq cb.array)
+  }
+
+  test("CharBuffer#toArraySlice does not throw class cast exception") {
+    val chunk: Chunk[Char] = Chunk.charBuffer(CharBuffer.allocate(4))
+    assertEquals(chunk.toArraySlice[Any].values.apply(0), 0)
   }
 
   test("compactUntagged - regression #2679") {

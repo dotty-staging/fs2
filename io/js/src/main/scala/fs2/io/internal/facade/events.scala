@@ -21,21 +21,27 @@
 
 package fs2.io.internal.facade.events
 
+import org.typelevel.scalaccompat.annotation._
+
 import cats.effect.kernel.Resource
 import cats.effect.kernel.Sync
 import cats.effect.std.Dispatcher
 import cats.syntax.all._
 
-import scala.annotation.nowarn
 import scala.scalajs.js
 
 @js.native
-@nowarn
+@nowarn212("cat=unused")
 private[io] trait EventEmitter extends js.Object {
+
+  protected[io] def on(eventName: String, listener: js.Function0[Unit]): this.type = js.native
 
   protected[io] def on[E](eventName: String, listener: js.Function1[E, Unit]): this.type = js.native
 
   protected[io] def on[E, F](eventName: String, listener: js.Function2[E, F, Unit]): this.type =
+    js.native
+
+  protected[io] def once(eventName: String, listener: js.Function0[Unit]): this.type =
     js.native
 
   protected[io] def once[E](eventName: String, listener: js.Function1[E, Unit]): this.type =
@@ -48,6 +54,8 @@ private[io] trait EventEmitter extends js.Object {
     js.native
 
   protected[io] def removeAllListeners(): this.type = js.native
+
+  protected[io] def removeAllListeners(eventName: String): this.type = js.native
 
 }
 

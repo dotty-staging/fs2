@@ -69,7 +69,7 @@ final class StreamDecoder[+A] private (private val step: StreamDecoder.Step[A]) 
       case Empty         => Pull.pure(Some(s))
       case Result(a)     => Pull.output1(a).as(Some(s))
       case Failed(cause) => Pull.raiseError(cause)
-      case Append(x, y) =>
+      case Append(x, y)  =>
         x(s).flatMap {
           case None      => Pull.pure(None)
           case Some(rem) => y()(rem)
@@ -78,7 +78,8 @@ final class StreamDecoder[+A] private (private val step: StreamDecoder.Step[A]) 
       case Decode(decoder, once, failOnErr) =>
         def loop(
             carry: BitVector,
-            s: Stream[F, BitVector]
+            s: Stream[F, BitVector],
+            carriedError: Option[Err]
         ): Pull[F, A, Option[Stream[F, BitVector]]] =
           s.pull.uncons1.flatMap {
             case Some((hd, tl)) =>
@@ -90,36 +91,59 @@ final class StreamDecoder[+A] private (private val step: StreamDecoder.Step[A]) 
                   if (once) p
                   else
                     p.flatMap {
-                      case Some(next) => loop(BitVector.empty, next)
-                      case None       => Pull.pure(None)
+                      case Some(next) =>
+                        loop(BitVector.empty, next, None)
+                      case None => Pull.pure(None)
                     }
-                case Attempt.Failure(_: Err.InsufficientBits) =>
-                  loop(buffer, tl)
+                case Attempt.Failure(e: Err.InsufficientBits) =>
+                  loop(buffer, tl, Some(e))
                 case Attempt.Failure(comp: Err.Composite)
                     if comp.errs.exists(_.isInstanceOf[Err.InsufficientBits]) =>
-                  loop(buffer, tl)
+                  loop(buffer, tl, Some(comp))
                 case Attempt.Failure(e) =>
                   if (failOnErr) Pull.raiseError(CodecError(e))
                   else Pull.pure(Some(tl.cons1(buffer)))
               }
-            case None => if (carry.isEmpty) Pull.pure(None) else Pull.pure(Some(Stream(carry)))
+            case None =>
+              def done = if (carry.isEmpty) Pull.pure(None) else Pull.pure(Some(Stream(carry)))
+              carriedError.filter(_ => failOnErr) match {
+                case Some(_: Err.InsufficientBits) if !once =>
+                  done
+                case Some(e: Err.Composite)
+                    if !once && e.errs.exists(_.isInstanceOf[Err.InsufficientBits]) =>
+                  done
+                case Some(e) => Pull.raiseError(CodecError(e))
+                case None    => done
+              }
           }
-        loop(BitVector.empty, s)
+        loop(BitVector.empty, s, None)
 
       case Isolate(bits, decoder) =>
         def loop(
             carry: BitVector,
-            s: Stream[F, BitVector]
+            s: Stream[F, BitVector],
+            carriedError: Option[Err]
         ): Pull[F, A, Option[Stream[F, BitVector]]] =
           s.pull.uncons1.flatMap {
             case Some((hd, tl)) =>
               val (buffer, remainder) = (carry ++ hd).splitAt(bits)
               if (buffer.size == bits)
                 decoder[F](Stream(buffer)) >> Pull.pure(Some(tl.cons1(remainder)))
-              else loop(buffer, tl)
-            case None => if (carry.isEmpty) Pull.pure(None) else Pull.pure(Some(Stream(carry)))
+              else {
+                assert(
+                  remainder.isEmpty,
+                  s"remainder should be empty; ${bits} ${carry.size} ${hd.size} ${buffer.size} ${remainder.size}"
+                )
+                loop(buffer, tl, Some(Err.InsufficientBits(bits, buffer.size, Nil)))
+              }
+            case None =>
+              carriedError match {
+                case Some(e) => Pull.raiseError(CodecError(e))
+                case None    =>
+                  if (carry.isEmpty) Pull.pure(None) else Pull.pure(Some(Stream(carry)))
+              }
           }
-        loop(BitVector.empty, s)
+        loop(BitVector.empty, s, None)
     }
 
   /** Creates a stream decoder that, upon decoding an `A`, applies it to the supplied function and decodes
@@ -129,9 +153,9 @@ final class StreamDecoder[+A] private (private val step: StreamDecoder.Step[A]) 
   def flatMap[B](f: A => StreamDecoder[B]): StreamDecoder[B] =
     new StreamDecoder[B](
       self.step match {
-        case Empty         => Empty
-        case Result(a)     => f(a).step
-        case Failed(cause) => Failed(cause)
+        case Empty                      => Empty
+        case Result(a)                  => f(a).step
+        case Failed(cause)              => Failed(cause)
         case Decode(g, once, failOnErr) =>
           Decode(in => g(in).map(_.map(_.flatMap(f))), once, failOnErr)
         case Isolate(bits, decoder) => Isolate(bits, decoder.flatMap(f))
@@ -139,12 +163,15 @@ final class StreamDecoder[+A] private (private val step: StreamDecoder.Step[A]) 
       }
     )
 
+  def filter(p: A => Boolean): StreamDecoder[A] =
+    flatMap(a => if (p(a)) StreamDecoder.emit(a) else StreamDecoder.empty)
+
   def handleErrorWith[A2 >: A](f: Throwable => StreamDecoder[A2]): StreamDecoder[A2] =
     new StreamDecoder[A2](
       self.step match {
-        case Empty         => Empty
-        case Result(a)     => Result(a)
-        case Failed(cause) => f(cause).step
+        case Empty                      => Empty
+        case Result(a)                  => Result(a)
+        case Failed(cause)              => f(cause).step
         case Decode(g, once, failOnErr) =>
           Decode(in => g(in).map(_.map(_.handleErrorWith(f))), once, failOnErr)
         case Isolate(bits, decoder) => Isolate(bits, decoder.handleErrorWith(f))
@@ -178,9 +205,7 @@ final class StreamDecoder[+A] private (private val step: StreamDecoder.Step[A]) 
           .apply[Fallible](Stream(bits))
           .flatMap { remainder =>
             remainder
-              .map { r =>
-                r.map(Right(_)).pull.echo
-              }
+              .map(r => r.map(Right(_)).pull.echo)
               .getOrElse(Pull.done)
           }
           .stream
@@ -196,10 +221,18 @@ final class StreamDecoder[+A] private (private val step: StreamDecoder.Step[A]) 
               case CodecError(e) => Attempt.failure(e)
               case other         => Attempt.failure(Err.General(other.getMessage, Nil))
             },
-            { case (acc, rem) => Attempt.successful(DecodeResult(acc, rem)) }
+            { case (acc, rem) =>
+              Attempt.successful(DecodeResult(acc, rem))
+            }
           )
       }
     }
+
+  /** Alias for [[filter]].
+    *
+    * Implemented to enable filtering in for comprehensions
+    */
+  def withFilter(p: A => Boolean): StreamDecoder[A] = filter(p)
 }
 
 object StreamDecoder {
@@ -234,6 +267,7 @@ object StreamDecoder {
     )
 
   /** Creates a stream decoder that repeatedly decodes `A` values using the supplied decoder.
+    * Note: insufficient bit errors raised from the supplied decoder do **not** get re-raised.
     */
   def many[A](decoder: Decoder[A]): StreamDecoder[A] =
     new StreamDecoder[A](
@@ -252,6 +286,7 @@ object StreamDecoder {
   /** Creates a stream decoder that repeatedly decodes `A` values until decoding fails.
     * If decoding fails, the read bits are not consumed and the stream decoder terminates,
     * having emitted any successfully decoded values earlier.
+    * Note: insufficient bit errors raised from the supplied decoder do **not** get re-raised.
     */
   def tryMany[A](decoder: Decoder[A]): StreamDecoder[A] =
     new StreamDecoder[A](
@@ -269,7 +304,7 @@ object StreamDecoder {
     * discarded.
     */
   def isolate[A](bits: Long)(decoder: StreamDecoder[A]): StreamDecoder[A] =
-    new StreamDecoder(Isolate(bits, decoder))
+    new StreamDecoder(Isolate(if (bits < 0) 0 else bits, decoder))
 
   /** Creates a stream decoder that ignores the specified number of bits. */
   def ignore(bits: Long): StreamDecoder[Nothing] =

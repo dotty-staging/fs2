@@ -23,13 +23,14 @@ package fs2
 package io
 package file
 
+import cats.effect.IO
+import cats.effect.LiftIO
 import cats.effect.Resource
 import cats.effect.kernel.Async
-import cats.effect.std.Hotswap
+import cats.effect.std.NonEmptyHotswap
 import cats.syntax.all._
 
 import scala.concurrent.duration._
-import cats.Traverse
 
 /** Provides operations related to working with files in the effect `F`.
   *
@@ -79,6 +80,9 @@ sealed trait Files[F[_]] extends FilesPlatform[F] {
   /** Creates the specified file with the specified permissions. Fails if the parent path does not already exist.
     */
   def createFile(path: Path, permissions: Option[Permissions]): F[Unit]
+
+  /** Creates a hard link with an existing file. */
+  def createLink(link: Path, existing: Path): F[Unit]
 
   /** Creates a symbolic link which points to the supplied target. */
   def createSymbolicLink(link: Path, target: Path): F[Unit] = createSymbolicLink(link, target, None)
@@ -170,7 +174,7 @@ sealed trait Files[F[_]] extends FilesPlatform[F] {
   def getBasicFileAttributes(path: Path): F[BasicFileAttributes] =
     getBasicFileAttributes(path, false)
 
-  /** Gets `BasicFileAttributes` for the supplied path. Symbolic links are not followed when `followLinks` is true. */
+  /** Gets `BasicFileAttributes` for the supplied path. Symbolic links are followed when `followLinks` is true. */
   def getBasicFileAttributes(path: Path, followLinks: Boolean): F[BasicFileAttributes]
 
   /** Gets the last modified time of the supplied path.
@@ -236,6 +240,9 @@ sealed trait Files[F[_]] extends FilesPlatform[F] {
   /** Returns true if the supplied paths reference the same file. */
   def isSameFile(path1: Path, path2: Path): F[Boolean]
 
+  /** Returns the line separator for the specific OS */
+  def lineSeparator: String
+
   /** Gets the contents of the specified directory. */
   def list(path: Path): Stream[F, Path]
 
@@ -265,13 +272,22 @@ sealed trait Files[F[_]] extends FilesPlatform[F] {
   def readAll(path: Path, chunkSize: Int, flags: Flags): Stream[F, Byte]
 
   /** Returns a `ReadCursor` for the specified path, using the supplied flags when opening the file. */
-  def readCursor(path: Path, flags: Flags): Resource[F, ReadCursor[F]]
+  def readCursor(path: Path, flags: Flags): Resource[F, ReadCursor[F]] =
+    open(path, flags.addIfAbsent(Flag.Read)).map { fileHandle =>
+      ReadCursor(fileHandle, 0L)
+    }
 
   /** Reads a range of data synchronously from the file at the specified path.
     * `start` is inclusive, `end` is exclusive, so when `start` is 0 and `end` is 2,
     * two bytes are read.
     */
   def readRange(path: Path, chunkSize: Int, start: Long, end: Long): Stream[F, Byte]
+
+  /** Reads all bytes from the file specified and decodes them as a utf8 string. */
+  def readUtf8(path: Path): Stream[F, String] = readAll(path).through(text.utf8.decode)
+
+  /** Reads all bytes from the file specified and decodes them as utf8 lines. */
+  def readUtf8Lines(path: Path): Stream[F, String] = readUtf8(path).through(text.lines)
 
   /** Returns the real path i.e. the actual location of `path`.
     * The precise definition of this method is implementation dependent but in general
@@ -358,11 +374,31 @@ sealed trait Files[F[_]] extends FilesPlatform[F] {
 
   /** Creates a stream of paths contained in a given file tree. Depth is unlimited. */
   def walk(start: Path): Stream[F, Path] =
-    walk(start, Int.MaxValue, false)
+    walk(start, WalkOptions.Default)
+
+  /** Creates a stream of paths contained in a given file tree.
+    *
+    * The `options` parameter allows for customizing the walk behavior. The `WalkOptions`
+    * type provides both `WalkOptions.Default` and `WalkOptions.Eager` as starting points,
+    * and further customizations can be specified via methods on the returned options value.
+    * For example, to eagerly walk a directory while following symbolic links, emitting all
+    * paths as a single chunk, use `walk(start, WalkOptions.Eager.withFollowLinks(true))`.
+    */
+  def walk(start: Path, options: WalkOptions): Stream[F, Path] =
+    walkWithAttributes(start, options).map(_.path)
 
   /** Creates a stream of paths contained in a given file tree down to a given depth.
     */
-  def walk(start: Path, maxDepth: Int, followLinks: Boolean): Stream[F, Path]
+  @deprecated("Use walk(start, WalkOptions.Default.withMaxDepth(..).withFollowLinks(..))", "3.10")
+  def walk(start: Path, maxDepth: Int, followLinks: Boolean): Stream[F, Path] =
+    walk(start, WalkOptions.Default.withMaxDepth(maxDepth).withFollowLinks(followLinks))
+
+  /** Like `walk` but returns a `PathInfo`, which provides both the `Path` and `BasicFileAttributes`. */
+  def walkWithAttributes(start: Path): Stream[F, PathInfo] =
+    walkWithAttributes(start, WalkOptions.Default)
+
+  /** Like `walk` but returns a `PathInfo`, which provides both the `Path` and `BasicFileAttributes`. */
+  def walkWithAttributes(start: Path, options: WalkOptions): Stream[F, PathInfo]
 
   /** Writes all data to the file at the specified path.
     *
@@ -399,19 +435,66 @@ sealed trait Files[F[_]] extends FilesPlatform[F] {
       limit: Long,
       flags: Flags
   ): Pipe[F, Byte, Nothing]
+
+  /** Writes to the specified file as an utf8 string.
+    *
+    * The file is created if it does not exist and is truncated.
+    * Use `writeUtf8(path, Flags.Append)` to append to the end of
+    * the file, or pass other flags to further customize behavior.
+    */
+  def writeUtf8(path: Path): Pipe[F, String, Nothing] = writeUtf8(path, Flags.Write)
+
+  /** Writes to the specified file as an utf8 string using
+    * the specified flags to open the file.
+    */
+  def writeUtf8(path: Path, flags: Flags): Pipe[F, String, Nothing] = in =>
+    in.through(text.utf8.encode).through(writeAll(path, flags))
+
+  /** Writes each string to the specified file as utf8 lines.
+    *
+    * The file is created if it does not exist and is truncated.
+    * Use `writeUtf8Lines(path, Flags.Append)` to append to the end
+    * of the file, or pass other flags to further customize behavior.
+    */
+  def writeUtf8Lines(path: Path): Pipe[F, String, Nothing] = writeUtf8Lines(path, Flags.Write)
+
+  /** Writes each string to the specified file as utf8 lines
+    * using the specified flags to open the file.
+    */
+  def writeUtf8Lines(path: Path, flags: Flags): Pipe[F, String, Nothing] = in =>
+    in.pull.uncons
+      .flatMap {
+        case Some((next, rest)) =>
+          Stream
+            .chunk(next)
+            .append(rest)
+            .intersperse(lineSeparator)
+            .append(Stream[F, String](lineSeparator))
+            .underlying
+        case None => Pull.done
+      }
+      .stream
+      .through(writeUtf8(path, flags))
 }
 
-object Files extends FilesCompanionPlatform {
-  private[file] abstract class UnsealedFiles[F[_]](implicit F: Async[F]) extends Files[F] {
+private[fs2] trait FilesLowPriority { this: Files.type =>
+  @deprecated("Add Files constraint or use forAsync", "3.7.0")
+  implicit def implicitForAsync[F[_]: Async]: Files[F] = forAsync
+}
+
+object Files extends FilesCompanionPlatform with FilesLowPriority {
+  def forIO: Files[IO] = forLiftIO
+
+  implicit def forLiftIO[F[_]: Async: LiftIO]: Files[F] = {
+    val _ = LiftIO[F]
+    forAsync
+  }
+
+  private[fs2] abstract class UnsealedFiles[F[_]](implicit F: Async[F]) extends Files[F] {
 
     def readAll(path: Path, chunkSize: Int, flags: Flags): Stream[F, Byte] =
       Stream.resource(readCursor(path, flags)).flatMap { cursor =>
         cursor.readAll(chunkSize).void.stream
-      }
-
-    def readCursor(path: Path, flags: Flags): Resource[F, ReadCursor[F]] =
-      open(path, flags.addIfAbsent(Flag.Read)).map { fileHandle =>
-        ReadCursor(fileHandle, 0L)
       }
 
     def readRange(path: Path, chunkSize: Int, start: Long, end: Long): Stream[F, Byte] =
@@ -445,43 +528,6 @@ object Files extends FilesCompanionPlatform {
       Resource.make(createTempDirectory(dir, prefix, permissions))(deleteRecursively(_).recover {
         case _: NoSuchFileException => ()
       })
-
-    def walk(start: Path, maxDepth: Int, followLinks: Boolean): Stream[F, Path] = {
-
-      def go(start: Path, maxDepth: Int, ancestry: List[Either[Path, FileKey]]): Stream[F, Path] =
-        Stream.emit(start) ++ {
-          if (maxDepth == 0) Stream.empty
-          else
-            Stream.eval(getBasicFileAttributes(start, followLinks = false)).flatMap { attr =>
-              if (attr.isDirectory)
-                list(start).flatMap { path =>
-                  go(path, maxDepth - 1, attr.fileKey.toRight(start) :: ancestry)
-                }.mask
-              else if (attr.isSymbolicLink && followLinks)
-                Stream.eval(getBasicFileAttributes(start, followLinks = true)).flatMap { attr =>
-                  val fileKey = attr.fileKey
-                  val isCycle = Traverse[List].existsM(ancestry) {
-                    case Right(ancestorKey) => F.pure(fileKey.contains(ancestorKey))
-                    case Left(ancestorPath) => isSameFile(start, ancestorPath)
-                  }
-
-                  Stream.eval(isCycle).flatMap { isCycle =>
-                    if (!isCycle)
-                      list(start).flatMap { path =>
-                        go(path, maxDepth - 1, attr.fileKey.toRight(start) :: ancestry)
-                      }.mask
-                    else
-                      Stream.raiseError(new FileSystemLoopException(start.toString))
-                  }
-
-                }
-              else
-                Stream.empty
-            }
-        }
-
-      Stream.eval(getBasicFileAttributes(start, followLinks)) >> go(start, maxDepth, Nil)
-    }
 
     def writeAll(
         path: Path,
@@ -522,7 +568,7 @@ object Files extends FilesCompanionPlatform {
         writeCursorFromFileHandle(file, flags.contains(Flag.Append))
 
       def go(
-          fileHotswap: Hotswap[F, FileHandle[F]],
+          fileHotswap: NonEmptyHotswap[F, FileHandle[F]],
           cursor: WriteCursor[F],
           acc: Long,
           s: Stream[F, Byte]
@@ -537,7 +583,7 @@ object Files extends FilesCompanionPlatform {
                   .eval {
                     fileHotswap
                       .swap(openNewFile)
-                      .flatMap(newCursor)
+                      .flatMap(_ => fileHotswap.get.use(newCursor))
                   }
                   .flatMap(nc => go(fileHotswap, nc, 0L, tl))
               else
@@ -549,9 +595,9 @@ object Files extends FilesCompanionPlatform {
 
       in =>
         Stream
-          .resource(Hotswap(openNewFile))
-          .flatMap { case (fileHotswap, fileHandle) =>
-            Stream.eval(newCursor(fileHandle)).flatMap { cursor =>
+          .resource(NonEmptyHotswap(openNewFile))
+          .flatMap { fileHotswap =>
+            Stream.eval(fileHotswap.get.use(newCursor)).flatMap { cursor =>
               go(fileHotswap, cursor, 0L, in).stream.drain
             }
           }

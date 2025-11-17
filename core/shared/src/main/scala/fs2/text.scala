@@ -27,6 +27,8 @@ import java.nio.charset.{
   CharacterCodingException,
   Charset,
   CharsetDecoder,
+  CharsetEncoder,
+  CodingErrorAction,
   MalformedInputException,
   StandardCharsets,
   UnmappableCharacterException
@@ -34,14 +36,37 @@ import java.nio.charset.{
 import scala.collection.mutable.{ArrayBuffer, Builder}
 import scodec.bits.{Bases, ByteVector}
 
+import scala.annotation.tailrec
+
 /** Provides utilities for working with streams of text (e.g., encoding byte streams to strings). */
 object text {
 
+  /** Byte order mark (BOM) values for different Unicode charsets.
+    */
+  object bom {
+
+    /** BOM for UTF-8.
+      */
+    val utf8: ByteVector = ByteVector(0xef, 0xbb, 0xbf)
+
+    /** BOM for UTF-16BE (big endian).
+      */
+    val utf16Big: ByteVector = ByteVector(0xfe, 0xff)
+
+    /** BOM for UTF-16LE (little endian).
+      */
+    val utf16Little: ByteVector = ByteVector(0xff, 0xfe)
+  }
+
   object utf8 {
     private val utf8Charset = Charset.forName("UTF-8")
-    private[this] val utf8BomSeq: Seq[Byte] = Array(0xef.toByte, 0xbb.toByte, 0xbf.toByte).toSeq
 
-    /** Converts UTF-8 encoded byte stream to a stream of `String`. */
+    /** Converts UTF-8 encoded byte stream to a stream of `String`.
+      *
+      * Note that the output stream is ''not'' a singleton stream but rather a stream
+      * of strings where each string is the result of UTF8 decoding a chunk of the
+      * underlying byte stream.
+      */
     def decode[F[_]]: Pipe[F, Byte, String] =
       _.chunks.through(decodeC)
 
@@ -143,7 +168,7 @@ object text {
               buf1 = processSingleChunk(bldr, buf1, nextBytes)
               idx = idx + 1
             }
-            Pull.output(Chunk.seq(bldr.result())) >> doPull(buf1, tail)
+            Pull.output(Chunk.from(bldr.result())) >> doPull(buf1, tail)
           case None if buf.nonEmpty =>
             Pull.output1(new String(buf.toArray, utf8Charset))
           case None =>
@@ -163,11 +188,12 @@ object text {
             val newBuffer: Chunk.Queue[Byte] = newBuffer0 :+ hd
             if (newBuffer.size >= 3) {
               val rem =
-                if (newBuffer.startsWith(utf8BomSeq)) newBuffer.drop(3)
+                if (newBuffer.startsWith(Chunk.byteVector(bom.utf8))) newBuffer.drop(3)
                 else newBuffer
               doPull(Chunk.empty, Stream.emits(rem.chunks) ++ tl)
-            } else
+            } else if (newBuffer.startsWith(Chunk.byteVector(bom.utf8.take(newBuffer.size.toLong))))
               processByteOrderMark(newBuffer, tl)
+            else doPull(Chunk.empty, Stream.emits(newBuffer.chunks) ++ tl)
           case None =>
             if (buffer ne null)
               doPull(Chunk.empty, Stream.emits(buffer.chunks))
@@ -299,12 +325,139 @@ object text {
     utf8.decodeC
 
   /** Encodes a stream of `String` in to a stream of bytes using the given charset. */
-  def encode[F[_]](charset: Charset): Pipe[F, String, Byte] =
-    _.mapChunks(c => c.flatMap(s => Chunk.array(s.getBytes(charset))))
+  def encode[F[_]](charset: Charset): Pipe[F, String, Byte] = { s =>
+    Stream
+      .suspend(Stream.emit(charset.newEncoder()))
+      .flatMap { // dispatch over different implementations for performance reasons
+        case encoder
+            if charset == StandardCharsets.UTF_8 ||
+              encoder.averageBytesPerChar() == encoder.maxBytesPerChar() =>
+          // 1. we know UTF-8 doesn't produce BOMs in encoding
+          // 2. maxBytes accounts for BOMs, average doesn't, so if they're equal, the charset encodes no BOM.
+          // In these cases, we can delegate to getBytes without having to fear BOMs being added in the wrong places.
+          // As the JDK optimizes this very well, this is the fastest implementation.
+          s.mapChunks(c => c.flatMap(s => Chunk.array(s.getBytes(charset))))
+        case _ if charset == StandardCharsets.UTF_16 =>
+          // encode strings individually to profit from Java optimizations, strip superfluous BOMs from output
+          encodeUsingBOMSlicing(s, charset, bom.utf16Big, doDrop = false).stream.unchunks
+        case encoder =>
+          // fallback to slower implementation using CharsetEncoder, known to be correct for all charsets
+          encodeUsingCharsetEncoder[F](encoder)(s).unchunks
+      }
+  }
 
   /** Encodes a stream of `String` in to a stream of `Chunk[Byte]` using the given charset. */
   def encodeC[F[_]](charset: Charset): Pipe[F, String, Chunk[Byte]] =
-    _.mapChunks(_.map(s => Chunk.array(s.getBytes(charset))))
+    s =>
+      Stream
+        .suspend(Stream.emit(charset.newEncoder()))
+        .flatMap { // dispatch over different implementations for performance reasons
+          case encoder
+              if charset == StandardCharsets.UTF_8 ||
+                encoder.averageBytesPerChar() == encoder.maxBytesPerChar() =>
+            // 1. we know UTF-8 doesn't produce BOMs in encoding
+            // 2. maxBytes accounts for BOMs, average doesn't, so if they're equal, the charset encodes no BOM.
+            // In these cases, we can delegate to getBytes without having to fear BOMs being added in the wrong places.
+            // As the JDK optimizes this very well, this is the fastest implementation.
+            s.mapChunks(_.map(s => Chunk.array(s.getBytes(charset))))
+          case _ if charset == StandardCharsets.UTF_16 =>
+            // encode strings individually to profit from Java optimizations, strip superfluous BOMs from output
+            encodeUsingBOMSlicing(s, charset, bom.utf16Big, doDrop = false).stream
+          case encoder =>
+            // fallback to slower implementation using CharsetEncoder, known to be correct for all charsets
+            encodeUsingCharsetEncoder[F](encoder)(s)
+        }
+
+  private def encodeUsingBOMSlicing[F[_]](
+      s: Stream[F, String],
+      charset: Charset,
+      bom: ByteVector,
+      doDrop: Boolean
+  ): Pull[F, Chunk[Byte], Unit] =
+    s.pull.uncons1.flatMap {
+      case Some((hd, tail)) =>
+        val bytes = Chunk.array(hd.getBytes(charset))
+        val dropped =
+          if (doDrop && bytes.startsWith(Chunk.byteVector(bom))) bytes.drop(bom.length.toInt)
+          else bytes
+        Pull.output1(dropped) >> encodeUsingBOMSlicing(tail, charset, bom, doDrop = true)
+      case None => Pull.done
+    }
+
+  private def encodeUsingCharsetEncoder[F[_]](
+      encoder: CharsetEncoder
+  ): Pipe[F, String, Chunk[Byte]] = {
+    def encodeC(
+        encoder: CharsetEncoder,
+        acc: Chunk[Char],
+        s: Stream[F, Chunk[Char]]
+    ): Pull[F, Chunk[Byte], Unit] =
+      s.pull.uncons1.flatMap { r =>
+        val toEncode = r match {
+          case Some((c, _)) => acc ++ c
+          case None         => acc
+        }
+
+        val isLast = r.isEmpty
+        val outBufferSize =
+          math.max(encoder.maxBytesPerChar(), encoder.averageBytesPerChar() * toEncode.size).toInt
+
+        val out = ByteBuffer.allocate(outBufferSize)
+
+        val inBuffer = toEncode.toCharBuffer
+        encoder.encode(inBuffer, out, isLast)
+        (out: Buffer).flip()
+
+        val nextAcc =
+          if (inBuffer.remaining() > 0) Chunk.charBuffer(inBuffer.slice()) else Chunk.empty
+
+        val rest = r match {
+          case Some((_, tail)) => tail
+          case None            => Stream.empty
+        }
+
+        if (out.remaining() > 0) {
+          Pull.output1(Chunk.ByteBuffer.view(out)) >> encodeC(encoder, nextAcc, rest)
+        } else if (!isLast) {
+          encodeC(encoder, nextAcc, rest)
+        } else if (nextAcc.nonEmpty) {
+          encodeC(encoder, nextAcc, rest)
+        } else flush(encoder, ByteBuffer.allocate(0))
+      }
+
+    @tailrec
+    def flush(
+        encoder: CharsetEncoder,
+        out: ByteBuffer
+    ): Pull[F, Chunk[Byte], Unit] = {
+      (out: Buffer).clear()
+      encoder.flush(out) match {
+        case res if res.isUnderflow =>
+          if (out.position() > 0) {
+            (out: Buffer).flip()
+            Pull.output1(Chunk.ByteBuffer.view(out)) >> Pull.done
+          } else
+            Pull.done
+        case res if res.isOverflow =>
+          val newSize = (out.capacity + encoder.maxBytesPerChar() * 2).toInt
+          val bigger = ByteBuffer.allocate(newSize)
+          flush(encoder, bigger)
+        case res =>
+          ApplicativeThrow[Pull[F, Chunk[Byte], *]].catchNonFatal(res.throwException())
+      }
+    }
+
+    { s =>
+      val configuredEncoder = encoder
+        .onMalformedInput(CodingErrorAction.REPLACE)
+        .onUnmappableCharacter(CodingErrorAction.REPLACE)
+      encodeC(
+        configuredEncoder,
+        Chunk.empty,
+        s.map(s => Chunk.CharBuffer.view(CharBuffer.wrap(s)))
+      ).stream
+    }
+  }
 
   /** Encodes a stream of `String` in to a stream of bytes using the UTF-8 charset. */
   @deprecated("Use text.utf8.encode", "3.1.0")
@@ -331,47 +484,52 @@ object text {
     def fillBuffers(
         stringBuilder: StringBuilder,
         linesBuffer: ArrayBuffer[String],
-        string: String
+        string: String,
+        ignoreFirstCharNewLine: BoolWrapper
     ): Unit = {
-      val l = stringBuilder.length
-
-      var i =
-        if (l > 0 && stringBuilder(l - 1) == '\r') {
-          if (string.nonEmpty && string(0) == '\n') {
-            stringBuilder.deleteCharAt(l - 1)
-            linesBuffer += stringBuilder.result()
-            stringBuilder.clear()
-            1
-          } else if (stringBuilder(l - 1) == '\r') {
-            stringBuilder.deleteCharAt(l - 1)
-            linesBuffer += stringBuilder.result()
-            stringBuilder.clear()
-            0
-          } else 0
-        } else 0
-
-      while (i < string.size) {
-        string(i) match {
-          case '\n' =>
-            linesBuffer += stringBuilder.result()
-            stringBuilder.clear()
-          case '\r' if i + 1 < string.size && string(i + 1) == '\n' =>
-            linesBuffer += stringBuilder.result()
-            stringBuilder.clear()
-            i += 1
-          case '\r' if i + 1 < string.size =>
-            linesBuffer += stringBuilder.result()
-            stringBuilder.clear()
-          case other =>
-            stringBuilder.append(other)
+      var i = if (ignoreFirstCharNewLine.value) {
+        ignoreFirstCharNewLine.value = false
+        if (string.nonEmpty && string(0) == '\n') {
+          1
+        } else {
+          0
         }
-        i += 1
+      } else {
+        0
+      }
+
+      val stringSize = string.size
+      while (i < stringSize) {
+        val idx = indexForNl(string, stringSize, i)
+        if (idx < 0) {
+          stringBuilder.appendAll(string.slice(i, stringSize))
+          i = stringSize
+        } else {
+          if (stringBuilder.isEmpty) {
+            linesBuffer += string.slice(i, idx)
+          } else {
+            stringBuilder.appendAll(string.slice(i, idx))
+            linesBuffer += stringBuilder.result()
+            stringBuilder.clear()
+          }
+          i = idx + 1
+          if (string(i - 1) == '\r') {
+            if (i < stringSize) {
+              if (string(i) == '\n') {
+                i += 1
+              }
+            } else {
+              ignoreFirstCharNewLine.value = true
+            }
+          }
+        }
       }
     }
 
     def go(
         stream: Stream[F, String],
         stringBuilder: StringBuilder,
+        ignoreFirstCharNewLine: BoolWrapper,
         first: Boolean
     ): Pull[F, String, Unit] =
       stream.pull.uncons.flatMap {
@@ -391,20 +549,43 @@ object text {
         case Some((chunk, stream)) =>
           val linesBuffer = ArrayBuffer.empty[String]
           chunk.foreach { string =>
-            fillBuffers(stringBuilder, linesBuffer, string)
+            fillBuffers(stringBuilder, linesBuffer, string, ignoreFirstCharNewLine)
           }
 
           maxLineLength match {
             case Some((max, raiseThrowable)) if stringBuilder.length > max =>
               Pull.raiseError[F](
                 new LineTooLongException(stringBuilder.length, max)
-              )(raiseThrowable)
+              )(using raiseThrowable)
             case _ =>
-              Pull.output(Chunk.indexedSeq(linesBuffer)) >> go(stream, stringBuilder, first = false)
+              Pull.output(Chunk.from(linesBuffer)) >> go(
+                stream,
+                stringBuilder,
+                ignoreFirstCharNewLine,
+                first = false
+              )
           }
       }
 
-    s => Stream.suspend(go(s, new StringBuilder(), first = true).stream)
+    s =>
+      Stream.suspend(
+        go(
+          s,
+          new StringBuilder(),
+          new BoolWrapper(false),
+          first = true
+        ).stream
+      )
+  }
+
+  /** Transforms a stream of `String` to a stream of `Char`. */
+  def string2char[F[_]]: Pipe[F, String, Char] =
+    _.flatMap(s => Stream.chunk(Chunk.charBuffer(CharBuffer.wrap(s))))
+
+  /** Transforms a stream of `Char` to a stream of `String`. */
+  def char2string[F[_]]: Pipe[F, Char, String] = _.chunks.map { chunk =>
+    val Chunk.ArraySlice(chars, offset, length) = chunk.toArraySlice
+    new String(chars, offset, length)
   }
 
   class LineTooLongException(val length: Int, val max: Int)
@@ -449,7 +630,7 @@ object text {
         while (idx < str.length) {
           str(idx) match {
             case c if alphabet.ignore(c) => // ignore
-            case c =>
+            case c                       =>
               val cidx =
                 if (padding == 0)
                   if (c == Pad)
@@ -700,4 +881,17 @@ object text {
     def encodeWithAlphabet[F[_]](alphabet: Bases.HexAlphabet): Pipe[F, Byte, String] =
       _.chunks.map(c => c.toByteVector.toHex(alphabet))
   }
+
+  private class BoolWrapper(var value: Boolean)
+
+  @inline private def indexForNl(string: String, stringSize: Int, begin: Int): Int = {
+    var i = begin
+    while (i < stringSize)
+      string.charAt(i) match {
+        case '\n' | '\r' => return i
+        case _           => i = i + 1
+      }
+    -1
+  }
+
 }

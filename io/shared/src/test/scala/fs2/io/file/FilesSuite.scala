@@ -23,7 +23,7 @@ package fs2
 package io
 package file
 
-import cats.effect.{IO, Resource}
+import cats.effect.{IO, Resource, Ref}
 import cats.kernel.Order
 import cats.syntax.all._
 
@@ -64,16 +64,24 @@ class FilesSuite extends Fs2Suite with BaseFileSuite {
     test("reads half of a file") {
       Stream
         .resource(tempFile.evalMap(modify))
-        .flatMap(path => Files[IO].readRange(path, 4096, 0, 2))
-        .map(_ => 1)
+        .flatMap(path => Files[IO].readRange(path, 4096, 2, 4))
         .compile
-        .foldMonoid
-        .assertEquals(2)
+        .toList
+        .assertEquals(List[Byte](2, 3))
     }
     test("reads full file if end is bigger than file size") {
       Stream
         .resource(tempFile.evalMap(modify))
         .flatMap(path => Files[IO].readRange(path, 4096, 0, 100))
+        .map(_ => 1)
+        .compile
+        .foldMonoid
+        .assertEquals(4)
+    }
+    test("can handle Long range endpoints") {
+      Stream
+        .resource(tempFile.evalMap(modify))
+        .flatMap(path => Files[IO].readRange(path, 4096, 0, Long.MaxValue))
         .map(_ => 1)
         .compile
         .foldMonoid
@@ -129,6 +137,68 @@ class FilesSuite extends Fs2Suite with BaseFileSuite {
         }
         .compile
         .drain
+    }
+
+    test("writeUtf8") {
+      Stream
+        .resource(tempFile)
+        .flatMap { path =>
+          Stream("Hello", " world!")
+            .covary[IO]
+            .through(Files[IO].writeUtf8(path)) ++ Files[IO]
+            .readAll(path)
+            .through(text.utf8.decode)
+        }
+        .compile
+        .foldMonoid
+        .assertEquals("Hello world!")
+    }
+
+    test("writeUtf8Lines") {
+      Stream
+        .resource(tempFile)
+        .flatMap { path =>
+          Stream("foo", "bar")
+            .covary[IO]
+            .through(Files[IO].writeUtf8Lines(path)) ++ Files[IO]
+            .readUtf8(path)
+        }
+        .compile
+        .foldMonoid
+        .assertEquals("""|foo
+                         |bar
+                         |""".stripMargin)
+    }
+
+    test("writeUtf8Lines - side effect") {
+      Stream
+        .resource(tempFile)
+        .flatMap { path =>
+          Stream.eval(Ref[IO].of(0)).flatMap { counter =>
+            Stream
+              .eval(counter.update(_ + 1).as(""))
+              .append(Stream.eval(counter.update(_ + 1).as("")))
+              .through(Files[IO].writeUtf8Lines(path)) ++
+              Stream.eval(counter.get)
+          }
+        }
+        .compile
+        .foldMonoid
+        .assertEquals(2)
+    }
+
+    test("writeUtf8Lines - empty stream") {
+      Stream
+        .resource(tempFile)
+        .flatMap { path =>
+          Stream.empty
+            .covary[IO]
+            .through(Files[IO].writeUtf8Lines(path)) ++ Files[IO]
+            .readUtf8(path)
+        }
+        .compile
+        .foldMonoid
+        .assertEquals("")
     }
   }
 
@@ -335,7 +405,7 @@ class FilesSuite extends Fs2Suite with BaseFileSuite {
         .use { tempDir =>
           val files = Files[IO]
           files
-            .tempFile(Some(tempDir), "", "", None)
+            .tempFile(Some(tempDir), "tmp", "", None)
             .use { file =>
               // files.exists(tempDir / file.fileName)
               IO.pure(file.startsWith(tempDir))
@@ -356,6 +426,16 @@ class FilesSuite extends Fs2Suite with BaseFileSuite {
           )
         }
         .assertEquals(true)
+    }
+
+    test("filename should begin with prefix and end with suffix") {
+      Files[IO].tempFile(None, "prefix", "suffix", None).use { path =>
+        IO {
+          val fn = path.fileName.toString
+          assert(clue(fn).startsWith("prefix"))
+          assert(clue(fn).endsWith("suffix"))
+        }
+      }
     }
   }
 
@@ -465,8 +545,18 @@ class FilesSuite extends Fs2Suite with BaseFileSuite {
       Stream
         .resource(tempFile)
         .flatMap { p =>
-          Files[IO].list(p).void.recover { case ex: NotDirectoryException =>
-            assertEquals(ex.getMessage, p.toString)
+          Files[IO].list(p).void.recover {
+            // java.io.UncheckedIOException is unavailable in Scala.js
+            case e: RuntimeException if isNative =>
+              e.getCause match {
+                case ex: NotDirectoryException =>
+                  assertEquals(ex.getMessage, p.toString)
+                case other =>
+                  fail(s"Unexpected error $other")
+              }
+
+            case ex: NotDirectoryException =>
+              assertEquals(ex.getMessage, p.toString)
           }
         }
         .compile
@@ -505,12 +595,144 @@ class FilesSuite extends Fs2Suite with BaseFileSuite {
       Stream
         .resource(tempFilesHierarchy)
         .flatMap(topDir => Files[IO].walk(topDir))
-        .map(_ => 1)
         .compile
-        .foldMonoid
-        .assertEquals(31) // the root + 5 children + 5 files per child directory
+        .count
+        .assertEquals(31L) // the root + 5 children + 5 files per child directory
     }
 
+    test("can delete files in a nested tree") {
+      Stream
+        .resource(tempFilesHierarchy)
+        .flatMap { topDir =>
+          Files[IO].walk(topDir).evalMap { path =>
+            Files[IO]
+              .isRegularFile(path)
+              .ifM(
+                Files[IO].deleteIfExists(path).as(1),
+                IO.pure(0)
+              )
+          }
+        }
+        .compile
+        .foldMonoid
+        .assertEquals(25)
+    }
+
+    test("maxDepth = 0") {
+      Stream
+        .resource(tempFilesHierarchy)
+        .flatMap(topDir => Files[IO].walk(topDir, WalkOptions.Default.withMaxDepth(0)))
+        .compile
+        .count
+        .assertEquals(1L) // the root
+    }
+
+    test("maxDepth = 1") {
+      Stream
+        .resource(tempFilesHierarchy)
+        .flatMap(topDir => Files[IO].walk(topDir, WalkOptions.Default.withMaxDepth(1)))
+        .compile
+        .count
+        .assertEquals(6L) // the root + 5 children
+    }
+
+    test("maxDepth = 1 / eager") {
+      Stream
+        .resource(tempFilesHierarchy)
+        .flatMap(topDir => Files[IO].walk(topDir, WalkOptions.Eager.withMaxDepth(1)))
+        .compile
+        .count
+        .assertEquals(6L) // the root + 5 children
+    }
+
+    test("maxDepth = 2") {
+      Stream
+        .resource(tempFilesHierarchy)
+        .flatMap(topDir => Files[IO].walk(topDir, WalkOptions.Default.withMaxDepth(2)))
+        .compile
+        .count
+        .assertEquals(31L) // the root + 5 children + 5 files per child directory
+    }
+
+    test("followLinks = true") {
+      Stream
+        .resource((tempFilesHierarchy, tempFilesHierarchy).tupled)
+        .evalMap { case (topDir, secondDir) =>
+          Files[IO].createSymbolicLink(topDir / "link", secondDir).as(topDir)
+        }
+        .flatMap(topDir => Files[IO].walk(topDir, WalkOptions.Default.withFollowLinks(true)))
+        .compile
+        .count
+        .assertEquals(31L * 2)
+    }
+
+    test("followLinks = false") {
+      Stream
+        .resource((tempFilesHierarchy, tempFilesHierarchy).tupled)
+        .evalMap { case (topDir, secondDir) =>
+          Files[IO].createSymbolicLink(topDir / "link", secondDir).as(topDir)
+        }
+        .flatMap(topDir => Files[IO].walk(topDir, WalkOptions.Default))
+        .compile
+        .count
+        .assertEquals(32L)
+    }
+
+    test("followLinks with cycle") {
+      Stream
+        .resource(tempFilesHierarchy)
+        .evalTap { topDir =>
+          Files[IO].createSymbolicLink(topDir / "link", topDir)
+        }
+        .flatMap(topDir => Files[IO].walk(topDir, WalkOptions.Default.withFollowLinks(true)))
+        .compile
+        .count
+        .intercept[FileSystemLoopException]
+    }
+
+    test("followLinks with cycle / eager") {
+      Stream
+        .resource(tempFilesHierarchy)
+        .evalTap { topDir =>
+          Files[IO].createSymbolicLink(topDir / "link", topDir)
+        }
+        .flatMap(topDir =>
+          Files[IO]
+            .walk(topDir, WalkOptions.Eager.withFollowLinks(true))
+        )
+        .compile
+        .count
+        .intercept[FileSystemLoopException]
+    }
+
+    test("followLinks with cycle / cycles allowed") {
+      Stream
+        .resource(tempFilesHierarchy)
+        .evalTap { topDir =>
+          Files[IO].createSymbolicLink(topDir / "link", topDir)
+        }
+        .flatMap(topDir =>
+          Files[IO].walk(topDir, WalkOptions.Default.withFollowLinks(true).withAllowCycles(true))
+        )
+        .compile
+        .count
+        .assertEquals(32L)
+    }
+
+    test("followLinks with cycle / eager / cycles allowed") {
+      Stream
+        .resource(tempFilesHierarchy)
+        .evalTap { topDir =>
+          Files[IO].createSymbolicLink(topDir / "link", topDir)
+        }
+        .flatMap(topDir =>
+          Files[IO]
+            .walk(topDir, WalkOptions.Eager.withFollowLinks(true).withAllowCycles(true))
+        )
+        .compile
+        .count
+        .assertEquals(32L)
+    }
   }
 
   test("writeRotate") {
@@ -729,6 +951,29 @@ class FilesSuite extends Fs2Suite with BaseFileSuite {
     }
   }
 
+  group("createLink") {
+    test("returns a link to the same file") {
+      (tempFile, tempDirectory).tupled
+        .use { case (filePath, tempDir) =>
+          val link = tempDir / "newlink"
+          Files[IO].getBasicFileAttributes(filePath).map(_.fileKey).flatMap { key =>
+            Files[IO]
+              .createLink(link, filePath) >>
+              Files[IO]
+                .getBasicFileAttributes(link)
+                .map(_.fileKey)
+                .assertEquals(key)
+          }
+        }
+    }
+
+    test("fails with IOException if the target doesn't exist") {
+      tempDirectory
+        .use(d => Files[IO].createLink(d.resolve("link"), d.resolve("non-existant")))
+        .intercept[NoSuchFileException]
+    }
+  }
+
   group("realPath") {
 
     test("doesn't fail if the path is for a file") {
@@ -750,6 +995,23 @@ class FilesSuite extends Fs2Suite with BaseFileSuite {
         .map(_.resolve("non-existent-file"))
         .use(Files[IO].realPath(_))
         .intercept[NoSuchFileException]
+    }
+  }
+
+  group("attributes") {
+
+    test("basic attributes are consistent for the same file") {
+      tempFile.use { p =>
+        val attr = Files[IO].getBasicFileAttributes(p)
+        (attr, attr).mapN(assertEquals(_, _))
+      }
+    }
+
+    test("posix attributes are consistent for the same file") {
+      tempFile.use { p =>
+        val attr = Files[IO].getPosixFileAttributes(p)
+        (attr, attr).mapN(assertEquals(_, _))
+      }
     }
   }
 

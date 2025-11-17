@@ -21,32 +21,34 @@
 
 package fs2.io.internal.facade
 
-import scala.annotation.nowarn
+import org.typelevel.scalaccompat.annotation._
+
 import scala.scalajs.js
 import scala.scalajs.js.annotation.JSImport
 import scala.scalajs.js.typedarray.Uint8Array
 
 import events.EventEmitter
 
-package object dgram {
+@nowarn212("cat=unused")
+private[io] object dgram {
 
   @js.native
   @JSImport("dgram", "createSocket")
-  @nowarn
-  private[io] def createSocket(`type`: String): Socket =
+  @nowarn212("cat=unused")
+  def createSocket(`type`: String): Socket =
     js.native
 
-}
-
-package dgram {
-
   @js.native
-  @nowarn
-  private[io] trait Socket extends EventEmitter {
+  trait Socket extends EventEmitter {
 
     def address(): AddressInfo = js.native
 
     def bind(options: BindOptions, cb: js.Function0[Unit]): Unit = js.native
+
+    def connect(port: Int, address: String, cb: js.Function1[js.UndefOr[js.Error], Unit]): Unit =
+      js.native
+
+    def disconnect(): Unit = js.native
 
     def addMembership(multicastAddress: String, multicastInterface: String): Unit = js.native
 
@@ -66,6 +68,9 @@ package dgram {
 
     def close(cb: js.Function0[Unit]): Unit = js.native
 
+    def send(msg: Uint8Array, cb: js.Function1[js.Error, Unit]): Unit =
+      js.native
+
     def send(msg: Uint8Array, port: Int, address: String, cb: js.Function1[js.Error, Unit]): Unit =
       js.native
 
@@ -77,7 +82,11 @@ package dgram {
 
     def setMulticastTTL(ttl: Int): Unit = js.native
 
+    def getRecvBufferSize: Int = js.native
+
     def setRecvBufferSize(size: Int): Unit = js.native
+
+    def getSendBufferSize: Int = js.native
 
     def setSendBufferSize(size: Int): Unit = js.native
 
@@ -86,21 +95,21 @@ package dgram {
   }
 
   @js.native
-  private[io] trait AddressInfo extends js.Object {
+  trait AddressInfo extends js.Object {
     def address: String = js.native
-    def family: Int = js.native
+    def family: String = js.native
     def port: Int = js.native
   }
 
-  private[io] trait BindOptions extends js.Object {
+  trait BindOptions extends js.Object {
     var port: js.UndefOr[Int] = js.undefined
     var address: js.UndefOr[String] = js.undefined
   }
 
   @js.native
-  private[io] trait RemoteInfo extends js.Object {
+  trait RemoteInfo extends js.Object {
     def address: String = js.native
-    def family: Int = js.native
+    def family: String = js.native
     def port: Int = js.native
     def size: Int = js.native
   }

@@ -33,7 +33,7 @@ class ChunkBenchmark {
 
   @Setup
   def setup() =
-    ints = Chunk.seq((0 until chunkSize).map(_ + 1000)).compact
+    ints = Chunk.from((0 until chunkSize).map(_ + 1000)).compact
 
   @Benchmark
   def map(): Unit = {
@@ -44,6 +44,16 @@ class ChunkBenchmark {
   @Benchmark
   def filter(): Unit = {
     ints.filter(_ % 3 == 0)
+    ()
+  }
+
+  private object OddStringExtractor {
+    def unapply(i: Int): Option[String] = if (i % 2 != 0) Some(i.toString) else None
+  }
+
+  @Benchmark
+  def collect(): Unit = {
+    ints.collect { case OddStringExtractor(s) => s }
     ()
   }
 }

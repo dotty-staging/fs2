@@ -29,7 +29,7 @@ import InterruptContext.InterruptionOutcome
 
 /** A context of interruption status. This is shared from the parent that was created as interruptible to all
   * its children. It assures consistent view of the interruption through the stack
-  * @param concurrent   Concurrent, used to create interruption at Eval.
+  * @param deferred Deferred, used to create interruption at Eval.
   *                 If signalled with None, normal interruption is signalled. If signaled with Some(err) failure is signalled.
   * @param ref      When None, scope is not interrupted,
   *                 when Some(None) scope was interrupted, and shall continue with `whenInterrupted`
@@ -87,10 +87,16 @@ final private[fs2] case class InterruptContext[F[_]](
   def eval[A](fa: F[A]): F[Either[InterruptionOutcome, A]] =
     ref.get.flatMap {
       case Some(outcome) => F.pure(Left(outcome))
-      case None =>
-        F.race(deferred.get, fa.attempt).map {
-          case Right(result) => result.leftMap(Outcome.Errored(_))
-          case Left(other)   => Left(other)
+      case None          =>
+        F.raceOutcome(deferred.get, fa.attempt).flatMap {
+          case Right(oc) =>
+            oc.fold(
+              F.canceled.as(Left(Outcome.Canceled())),
+              e => F.raiseError(e),
+              x => x.map(_.leftMap(Outcome.Errored(_)))
+            )
+          case Left(oc) =>
+            oc.embedNever.map(Left(_))
         }
     }
 }

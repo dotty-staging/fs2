@@ -24,8 +24,9 @@ package fs2
 import scala.concurrent.duration._
 
 import cats.effect.{IO, Sync}
-import cats.effect.kernel.Deferred
+import cats.effect.kernel.{Deferred, Outcome}
 import cats.effect.std.Semaphore
+import fs2.concurrent.SignallingRef
 import org.scalacheck.effect.PropF.forAllF
 
 class StreamInterruptSuite extends Fs2Suite {
@@ -55,96 +56,93 @@ class StreamInterruptSuite extends Fs2Suite {
     }
   }
 
-  // These IO streams cannot be interrupted on JS b/c they never yield execution
-  if (isJVM) {
-    test("3 - constant stream") {
-      val interruptSoon = Stream.sleep_[IO](20.millis).compile.drain.attempt
-      Stream
-        .constant(true)
-        .interruptWhen(interruptSoon)
-        .compile
-        .drain
-        .replicateA(interruptRepeatCount)
-    }
+  test("3 - constant stream") {
+    val interruptSoon = Stream.sleep_[IO](20.millis).compile.drain.attempt
+    Stream
+      .constant(true)
+      .interruptWhen(interruptSoon)
+      .compile
+      .drain
+      .replicateA(interruptRepeatCount)
+  }
 
-    test("4 - interruption of constant stream with a flatMap") {
-      val interrupt =
-        Stream.sleep_[IO](20.millis).compile.drain.attempt
-      Stream
-        .constant(true)
-        .interruptWhen(interrupt)
-        .flatMap(_ => Stream.emit(1))
-        .compile
-        .drain
-        .replicateA(interruptRepeatCount)
-    }
+  test("4 - interruption of constant stream with a flatMap") {
+    val interrupt =
+      Stream.sleep_[IO](20.millis).compile.drain.attempt
+    Stream
+      .constant(true)
+      .interruptWhen(interrupt)
+      .flatMap(_ => Stream.emit(1))
+      .compile
+      .drain
+      .replicateA(interruptRepeatCount)
+  }
 
-    test("5 - interruption of an infinitely recursive stream") {
-      val interrupt =
-        Stream.sleep_[IO](20.millis).compile.drain.attempt
+  test("5 - interruption of an infinitely recursive stream") {
+    val interrupt =
+      Stream.sleep_[IO](20.millis).compile.drain.attempt
 
-      def loop(i: Int): Stream[IO, Int] =
-        Stream.emit(i).flatMap(i => Stream.emit(i) ++ loop(i + 1))
+    def loop(i: Int): Stream[IO, Int] =
+      Stream.emit(i).flatMap(i => Stream.emit(i) ++ loop(i + 1))
 
-      loop(0)
-        .interruptWhen(interrupt)
-        .compile
-        .drain
-        .replicateA(interruptRepeatCount)
-    }
+    loop(0)
+      .interruptWhen(interrupt)
+      .compile
+      .drain
+      .replicateA(interruptRepeatCount)
+  }
 
-    test("6 - interruption of an infinitely recursive stream that never emits") {
-      val interrupt =
-        Stream.sleep_[IO](20.millis).compile.drain.attempt
+  test("6 - interruption of an infinitely recursive stream that never emits") {
+    val interrupt =
+      Stream.sleep_[IO](20.millis).compile.drain.attempt
 
-      def loop: Stream[IO, Nothing] =
-        Stream.eval(IO.unit) >> loop
+    def loop: Stream[IO, Nothing] =
+      Stream.eval(IO.unit) >> loop
 
-      loop
-        .interruptWhen(interrupt)
-        .compile
-        .drain
-        .replicateA(interruptRepeatCount)
-    }
+    loop
+      .interruptWhen(interrupt)
+      .compile
+      .drain
+      .replicateA(interruptRepeatCount)
+  }
 
-    test("7 - interruption of an infinitely recursive stream that never emits and has no eval") {
-      val interrupt = Stream.sleep_[IO](20.millis).compile.drain.attempt
-      def loop: Stream[IO, Int] = Stream.emit(()) >> loop
-      loop
-        .interruptWhen(interrupt)
-        .compile
-        .drain
-        .replicateA(interruptRepeatCount)
-    }
+  test("7 - interruption of an infinitely recursive stream that never emits and has no eval") {
+    val interrupt = Stream.sleep_[IO](20.millis).compile.drain.attempt
+    def loop: Stream[IO, Int] = Stream.emit(()) >> loop
+    loop
+      .interruptWhen(interrupt)
+      .compile
+      .drain
+      .replicateA(interruptRepeatCount)
+  }
 
-    test("8 - interruption of a stream that repeatedly evaluates") {
-      val interrupt =
-        Stream.sleep_[IO](20.millis).compile.drain.attempt
-      Stream
-        .repeatEval(IO.unit)
-        .interruptWhen(interrupt)
-        .compile
-        .drain
-        .replicateA(interruptRepeatCount)
-    }
+  test("8 - interruption of a stream that repeatedly evaluates") {
+    val interrupt =
+      Stream.sleep_[IO](20.millis).compile.drain.attempt
+    Stream
+      .repeatEval(IO.unit)
+      .interruptWhen(interrupt)
+      .compile
+      .drain
+      .replicateA(interruptRepeatCount)
+  }
 
-    test("9 - interruption of the constant drained stream") {
-      val interrupt =
-        Stream.sleep_[IO](1.millis).compile.drain.attempt
-      Stream
-        .constant(true)
-        .dropWhile(!_)
-        .interruptWhen(interrupt)
-        .compile
-        .drain
-        .replicateA(interruptRepeatCount)
-    }
+  test("9 - interruption of the constant drained stream") {
+    val interrupt =
+      Stream.sleep_[IO](1.millis).compile.drain.attempt
+    Stream
+      .constant(true)
+      .dropWhile(!_)
+      .interruptWhen(interrupt)
+      .compile
+      .drain
+      .replicateA(interruptRepeatCount)
+  }
 
-    test("10 - terminates when interruption stream is infinitely false") {
-      forAllF { (s: Stream[Pure, Int]) =>
-        val allFalse = Stream.constant(false)
-        s.covary[IO].interruptWhen(allFalse).assertEmitsSameAs(s)
-      }
+  test("10 - terminates when interruption stream is infinitely false") {
+    forAllF { (s: Stream[Pure, Int]) =>
+      val allFalse = Stream.constant(false)
+      s.covary[IO].interruptWhen(allFalse).assertEmitsSameAs(s)
     }
   }
 
@@ -364,7 +362,7 @@ class StreamInterruptSuite extends Fs2Suite {
 
   test("23 - sync compiler interruption - succeeds when interrupted never") {
     val ioNever = IO.never[Either[Throwable, Unit]]
-    compileWithSync(Stream.empty[IO].interruptWhen(ioNever)).toList.assertEquals(Nil)
+    compileWithSync(Stream.empty.covary[IO].interruptWhen(ioNever)).toList.assertEquals(Nil)
   }
 
   test("24 - sync compiler interruption - non-terminating when interrupted") {
@@ -372,4 +370,14 @@ class StreamInterruptSuite extends Fs2Suite {
     val interrupt = IO.sleep(250.millis)
     IO.race(compileWithSync(s).drain, interrupt).map(_.isRight).assert
   }
+
+  // https://github.com/typelevel/fs2/issues/2963
+  test("25 - interaction of interruptWhen and eval(canceled)") {
+    SignallingRef[IO, Boolean](false)
+      .flatMap { sig =>
+        Stream.eval(IO.canceled).interruptWhen(sig).compile.drain.start.flatMap(_.join)
+      }
+      .assertEquals(Outcome.Canceled[IO, Throwable, Unit]())
+  }
+
 }

@@ -23,7 +23,6 @@ package fs2
 package interop
 
 import cats.effect.kernel._
-import cats.effect.std.Dispatcher
 import org.reactivestreams._
 
 /** Implementation of the reactivestreams protocol for fs2
@@ -42,6 +41,14 @@ import org.reactivestreams._
   * }}}
   *
   * @see [[http://www.reactive-streams.org/]]
+  *
+  * @deprecated
+  *   The next major version of fs2 will drop these converters.
+  *   Rather, users will be encouraged to use the new [[fs2.interop.flow]] package,
+  *   which provides support for the `java.util.concurrent.Flow` types;
+  *   that superseded the `reactive-streams` library.
+  *   In case you need to interop with a library that only provides `reactive-streams` types,
+  *   you may use [[https://www.reactive-streams.org/reactive-streams-flow-adapters-1.0.2-javadoc/org/reactivestreams/FlowAdapters.html `org.reactivestreams.FlowAdapters`]]
   */
 package object reactivestreams {
 
@@ -53,6 +60,7 @@ package object reactivestreams {
     *                   A high number can be useful if the publisher is triggering from IO, like requesting elements from a database.
     *                   The publisher can use this `bufferSize` to query elements in batch.
     *                   A high number will also lead to more elements in memory.
+    *                   The stream will not emit new element until, either the `Chunk` is filled or the publisher finishes.
     */
   def fromPublisher[F[_]: Async, A](p: Publisher[A], bufferSize: Int): Stream[F, A] =
     Stream
@@ -77,9 +85,10 @@ package object reactivestreams {
     /** Creates a lazy stream from an `org.reactivestreams.Publisher`
       *
       * @param bufferSize setup the number of elements asked each time from the `org.reactivestreams.Publisher`.
-      *                   A high number can be useful is the publisher is triggering from IO, like requesting elements from a database.
+      *                   A high number can be useful if the publisher is triggering from IO, like requesting elements from a database.
       *                   The publisher can use this `bufferSize` to query elements in batch.
       *                   A high number will also lead to more elements in memory.
+      *                   The stream will not emit new element until, either the `Chunk` is filled or the publisher finishes.
       */
     def toStreamBuffered[F[_]: Async](bufferSize: Int): Stream[F, A] =
       fromPublisher(publisher, bufferSize)
@@ -93,18 +102,39 @@ package object reactivestreams {
       fromPublisher(publisher)
   }
 
+  /** Allows subscribing a `org.reactivestreams.Subscriber` to a [[Stream]].
+    *
+    * The returned program will run until
+    * all the stream elements were consumed.
+    * Cancelling this program will gracefully shutdown the subscription.
+    *
+    * @param stream the [[Stream]] that will be consumed by the subscriber.
+    * @param subscriber the Subscriber that will receive the elements of the stream.
+    */
+  def subscribeStream[F[_], A](stream: Stream[F, A], subscriber: Subscriber[A])(implicit
+      F: Async[F]
+  ): F[Unit] =
+    StreamSubscription.subscribe(stream, subscriber)
+
   implicit final class StreamOps[F[_], A](val stream: Stream[F, A]) {
 
-    /** Creates a [[StreamUnicastPublisher]] from a stream.
+    /** Creates a [[StreamUnicastPublisher]] from a [[Stream]].
       *
-      * This publisher can only have a single subscription.
       * The stream is only ran when elements are requested.
+      *
+      * @note Not longer unicast, this Publisher can be reused for multiple Subscribers:
+      *       each subscription will re-run the [[Stream]] from the beginning.
       */
     def toUnicastPublisher(implicit
         F: Async[F]
     ): Resource[F, StreamUnicastPublisher[F, A]] =
-      Dispatcher[F].map { dispatcher =>
-        StreamUnicastPublisher(stream, dispatcher)
-      }
+      StreamUnicastPublisher(stream)
+
+    /** Subscribes the provided `org.reactivestreams.Subscriber` to this stream.
+      *
+      * @param subscriber the Subscriber that will receive the elements of the stream.
+      */
+    def subscribe(subscriber: Subscriber[A])(implicit F: Async[F]): F[Unit] =
+      reactivestreams.subscribeStream(stream, subscriber)
   }
 }

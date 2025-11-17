@@ -50,8 +50,8 @@ object ThisModuleShouldCompile {
   Stream.eval(IO.pure(4)) ++ Stream(1, 2, 3).covary[IO]
   Stream.eval(IO.pure(4)) ++ (Stream(1, 2, 3): Stream[IO, Int])
   Stream(1, 2, 3).flatMap(i => Stream.eval(IO.pure(i)))
-  (Stream(1, 2, 3)
-    .covary[IO])
+  Stream(1, 2, 3)
+    .covary[IO]
     .pull
     .uncons1
     .flatMap {
@@ -82,7 +82,7 @@ object ThisModuleShouldCompile {
   val q: Pull[IO, Nothing, Option[(Chunk[Int], Stream[Pure, Int])]] = p
 
   val streamId: Stream[Id, Int] = Stream(1, 2, 3)
-  (streamId.covaryId[IO]): Stream[IO, Int]
+  streamId.covaryId[IO]: Stream[IO, Int]
 
   def polyId[F[_]: Applicative, A](stream: Stream[Id, A]): Stream[F, A] =
     stream.covaryId[F].through(_.take(2))
@@ -98,8 +98,14 @@ object ThisModuleShouldCompile {
   // Join a pure stream of effectful streams without type annotations
   Stream(s, s).parJoinUnbounded
 
+  // Join a sequence of effectful streams without type annotations
+  List(s, s).parJoinUnbounded
+
   // Join an effectul stream of pure streams requires type annotation on inner stream
   Stream[IO, Stream[IO, Nothing]](Stream.empty).parJoinUnbounded
+
+  // Join a sequence of pure streams requires type annotation on inner stream
+  List[Stream[IO, Nothing]](Stream.empty).parJoinUnbounded
 
   val pure: List[Int] = Stream.range(0, 5).compile.toList
   val io: IO[List[Int]] = Stream.range(0, 5).covary[IO].compile.toList
@@ -114,4 +120,8 @@ object ThisModuleShouldCompile {
   Stream(1, 2, 3).compile.to(Set)
   Stream(1, 2, 3).to(List)
   Stream(1, 2, 3).covary[Fallible].to(List)
+  Stream(1, 2, 3).to(Set)
+  Stream(1, 2, 3).to(collection.immutable.SortedSet)
+  Stream(1 -> 1, 2 -> 2, 3 -> 3).to(Map)
+  Stream(1 -> 1, 2 -> 2, 3 -> 3).to(collection.immutable.SortedMap)
 }

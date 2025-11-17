@@ -34,7 +34,7 @@ class JvmFilesSuite extends Fs2Suite with BaseFileSuite {
     test("copy from local filesystem to in-memory filesystem") {
       val fs = Jimfs.newFileSystem(Configuration.unix)
       tempFile.evalMap(modify).use { src =>
-        val dst = Path.fromNioPath(fs.getPath("copied"))
+        val dst = Path.fromFsPath(fs, "copied")
         Files[IO].copy(src, dst) *> (Files[IO].size(src), Files[IO].size(dst)).tupled.map {
           case (srcSize, dstSize) => assertEquals(dstSize, srcSize)
         }
@@ -60,6 +60,25 @@ class JvmFilesSuite extends Fs2Suite with BaseFileSuite {
 
       (walk, nioWalk).mapN(assertEquals(_, _))
     }
+  }
+
+  test("read from SeekableByteChannel") {
+    Stream
+      .resource(
+        tempFile
+          .evalMap(modify)
+          .flatMap(path =>
+            Files[IO].openSeekableByteChannel(
+              IO.blocking(JFiles.newByteChannel(path.toNioPath, Flag.Read.option)),
+              new UnsupportedOperationException()
+            )
+          )
+          .map(new ReadCursor[IO](_, 0))
+      )
+      .flatMap(_.readAll(4096).void.stream)
+      .compile
+      .toList
+      .assertEquals(List[Byte](0, 1, 2, 3))
   }
 
 }

@@ -31,6 +31,8 @@ import org.scalacheck.effect.PropF.forAllF
 
 class BracketSuite extends Fs2Suite {
 
+  override def munitIOTimeout = 1.minute
+
   sealed trait BracketEvent
   case object Acquired extends BracketEvent
   case object Released extends BracketEvent
@@ -51,7 +53,7 @@ class BracketSuite extends Fs2Suite {
       withBracketEventRecorder { recorder =>
         (recorder.recordBracketEvents.evalMap(_ => recorder.assertHistoryIs(Acquired))
           >> testCase).compile.drain
-          .handleError { case _: Err => () } >>
+          .recover { case _: Err => () } >>
           recorder.assertHistoryIs(Acquired, Released)
       }
 
@@ -72,7 +74,7 @@ class BracketSuite extends Fs2Suite {
           .append(recorder.recordBracketEvents >> use2)
           .compile
           .drain
-          .handleError { case _: Err => () } >>
+          .recover { case _: Err => () } >>
           recorder.assertHistoryIs(Acquired, Released, Acquired, Released)
       }
 
@@ -343,7 +345,7 @@ class BracketSuite extends Fs2Suite {
               tl.pull.uncons
                 .flatMap {
                   case Some(_) => throw new Err
-                  case None =>
+                  case None    =>
                     Pull.eval(r.get.flatMap(b => if (b) IO.unit else IO.raiseError(new Err)))
                 }
                 .lease
@@ -356,5 +358,35 @@ class BracketSuite extends Fs2Suite {
       .stream
       .compile
       .drain
+  }
+
+  test("#2966 release is uncancelable") {
+    IO.ref(false)
+      .flatMap { released =>
+        Stream
+          .bracket(IO.unit)(_ => IO.canceled *> released.set(true))
+          .compile
+          .drain
+          .start
+          .flatMap(_.join) *> released.get.assert
+      }
+  }
+
+  val activeFibers = if (isJVM) 10000 else 100
+  test(
+    s"#3473 Scope.close frees it's children and it's parent's reference to itself uncancelably ($activeFibers fibers)"
+  ) {
+    (0 until 4).toList.traverse_ { _ =>
+      val fa = IO.ref(0).flatMap { ref =>
+        val res = Stream.resource(Resource.make(ref.update(_ + 1))(_ => ref.update(_ - 1)))
+
+        (0 to activeFibers).toList.parTraverse_ { _ =>
+          val fa = res.evalMap(_ => IO.sleep(10.millis)).take(10).compile.drain
+          IO.race(fa, IO.sleep(90.millis))
+        } >> ref.get.map(assertEquals(_, 0))
+      }
+
+      fa
+    }
   }
 }

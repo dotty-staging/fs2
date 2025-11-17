@@ -32,6 +32,8 @@ import org.scalacheck.effect.PropF.forAllF
 
 class StreamZipSuite extends Fs2Suite {
 
+  override def munitIOTimeout = 1.minute
+
   group("zip") {
     test("propagate error from closing the root scope") {
       val s1 = Stream.bracket(SyncIO(1))(_ => SyncIO.unit)
@@ -175,9 +177,8 @@ class StreamZipSuite extends Fs2Suite {
         Logger[IO]
           .flatMap { logger =>
             def s(tag: String) =
-              logger.logLifecycle(tag) >> {
+              logger.logLifecycle(tag) >>
                 logger.logLifecycle(s"$tag - 1") ++ logger.logLifecycle(s"$tag - 2")
-              }
 
             s("a").zip(s("b")).compile.drain >>
               logger.get.assertEquals(
@@ -275,7 +276,7 @@ class StreamZipSuite extends Fs2Suite {
             case None => IO.raiseError[Vector[(String, Int)]](new Throwable("Results not found"))
             case Some(Outcome.Succeeded(v)) => IO.pure(v)
             case Some(Outcome.Errored(ex))  => IO.raiseError[Vector[(String, Int)]](ex)
-            case Some(Outcome.Canceled()) =>
+            case Some(Outcome.Canceled())   =>
               IO.raiseError[Vector[(String, Int)]](
                 new Throwable("Cancelled found on results outcome")
               )
